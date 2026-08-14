@@ -17,6 +17,23 @@ import {
   selectPaymentRequirements,
 } from "x402/client";
 
+let hasWarnedLegacyDeprecation = false;
+
+/**
+ * Warns once per process that this package is the frozen x402 protocol v1
+ * implementation.
+ */
+function warnLegacyDeprecation(): void {
+  if (hasWarnedLegacyDeprecation) return;
+  hasWarnedLegacyDeprecation = true;
+  console.warn(
+    '[x402-axios] DEPRECATED: "x402-axios" is the x402 protocol v1 client implementation and ' +
+      "is frozen. It will not interoperate with servers that only advertise payment terms via " +
+      'the v2 "PAYMENT-REQUIRED" header. Please migrate to "@x402/axios": ' +
+      "https://www.npmjs.com/package/@x402/axios",
+  );
+}
+
 /**
  * Enables the payment of APIs using the x402 payment protocol.
  *
@@ -63,6 +80,8 @@ export function withPaymentInterceptor(
   paymentRequirementsSelector: PaymentRequirementsSelector = selectPaymentRequirements,
   config?: X402Config,
 ) {
+  warnLegacyDeprecation();
+
   axiosClient.interceptors.response.use(
     response => response,
     async (error: AxiosError) => {

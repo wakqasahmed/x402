@@ -14,6 +14,23 @@ import {
   settlePayment,
 } from "./utils";
 
+let hasWarnedLegacyDeprecation = false;
+
+/**
+ * Warns once per process that this package is the frozen x402 protocol v1
+ * implementation and does not speak the v2 "PAYMENT-REQUIRED" header dialect.
+ */
+function warnLegacyDeprecation(): void {
+  if (hasWarnedLegacyDeprecation) return;
+  hasWarnedLegacyDeprecation = true;
+  console.warn(
+    '[x402-next] DEPRECATED: "x402-next" implements x402 protocol v1 and only emits ' +
+      'payment terms in the JSON response body. v2 clients read the "PAYMENT-REQUIRED" header ' +
+      'instead and will not be able to pay you. Please migrate to "@x402/next": ' +
+      "https://www.npmjs.com/package/@x402/next",
+  );
+}
+
 /**
  * Creates a payment middleware factory for Next.js
  *
@@ -82,6 +99,8 @@ export function paymentMiddleware(
   facilitator?: FacilitatorConfig,
   paywall?: PaywallConfig,
 ) {
+  warnLegacyDeprecation();
+
   const { verify, settle, supported } = useFacilitator(facilitator);
   const x402Version = 1;
 
@@ -245,6 +264,8 @@ export function withX402<T = unknown>(
   facilitator?: FacilitatorConfig,
   paywall?: PaywallConfig,
 ): (request: NextRequest) => Promise<NextResponse<T | unknown>> {
+  warnLegacyDeprecation();
+
   const { verify, settle, supported } = useFacilitator(facilitator);
   const x402Version = 1;
 
