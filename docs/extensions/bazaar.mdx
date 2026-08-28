@@ -919,33 +919,15 @@ Common protocol-level mistakes include:
    the declaration was accepted but indexing may happen later. Allow for delay
    before concluding failure with your facilitator.
 
-5. **The cold probe.** A resource must be reachable and return `402 Payment
-   Required` to an unpaid, bodyless request — the "cold probe" that
-   facilitators and third-party catalogs use to confirm a listing is live.
-   The most common way to fail it is ordering: schema/body validation, auth
-   middleware, or method routing runs ahead of the payment gate and answers
-   `400`, `401`, `405`, or `500` before the `402` challenge is ever issued.
-   Real purchases still succeed, because a real client always sends a valid
-   body, so the failure is invisible in production traffic and revenue looks
-   healthy while the listing silently degrades or gets deindexed.
-
-   A production example: an operator's `/purchase` routes had middleware
-   reordered so body validation ran before the x402 payment gate. Actual
-   purchase requests always included the required fields, so validation
-   passed and the payment gate ran normally — nothing looked wrong on the
-   operator's own metrics. But a bodyless discovery probe hit validation
-   first, received a `400`/`500` instead of `402`, and the listing was
-   silently deindexed with no error surfaced to the operator. The fix was to
-   fold the resource/offer resolution needed for a payment challenge into the
-   payment gate itself, so a bodyless request can never reach validation
-   before the `402` is issued — and to add a middleware-ordering test to CI
-   so the same class of regression fails a build instead of shipping silently.
-
-   To avoid this: make sure the payment gate is the first thing a request can
-   hit, ahead of any validation or auth middleware that assumes a well-formed
-   body. Test with a bare, unauthenticated, bodyless request in addition to
-   your normal integration tests — a passing payment flow does not prove the
-   cold probe passes.
+5. **Middleware ordering can hide the payment gate from a bare probe.** Some
+   facilitators or catalogs probe with an unpaid, bodyless request and expect
+   `402` back — check that specific facilitator's policy, since this isn't
+   an x402 protocol requirement. If schema/body validation or auth middleware
+   runs ahead of the payment gate, that probe can get a `400`/`401`/`500`
+   instead. Real traffic still succeeds because real clients send valid
+   bodies, so the test suite passes silently with no assertion on what a
+   bodyless request actually returns. Add a CI test asserting the payment
+   gate runs first, ahead of body-dependent middleware.
 
 If your facilitator exposes optional discovery endpoints,
 `GET /discovery/resources?payTo=<address>` can confirm what that facilitator
