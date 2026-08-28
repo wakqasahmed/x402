@@ -91,7 +91,7 @@ export function validateBazaarRouteExtensions(routes: RoutesConfig): void {
           );
           warnedSchemaValidationUnavailable = true;
         }
-        return;
+        continue;
       }
       if (!schemaResult.valid) {
         console.warn(

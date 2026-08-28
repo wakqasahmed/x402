@@ -60,4 +60,35 @@ describe("bazaar schema validation on runtimes without dynamic code generation",
     expect(spy.mock.calls[0][0]).toContain("unavailable in this runtime");
     spy.mockRestore();
   });
+
+  it("still runs non-schema checks on routes after the first schema-unavailable warning", async () => {
+    const { validateBazaarRouteExtensions } = await import("../src/bazaar/startupValidation");
+    const spy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const validExtension = {
+      info: { input: { type: "http", method: "GET" } },
+      schema: { type: "object" },
+    };
+    const routes = {
+      "GET /a": {
+        accepts: [{ scheme: "exact", payTo: "0x1", price: "$0.01", network: "eip155:1" as const }],
+        extensions: { bazaar: validExtension },
+      },
+      "GET /b": {
+        accepts: [{ scheme: "exact", payTo: "0x1", price: "$0.01", network: "eip155:1" as const }],
+        // Malformed: missing "schema" field entirely, so this should hit the
+        // "declares a bazaar extension but it is malformed" branch, which is
+        // pure JS and unaffected by the ajv-unavailable condition on /a.
+        extensions: { bazaar: { info: { input: { type: "http", method: "GET" } } } },
+      },
+    };
+
+    validateBazaarRouteExtensions(routes);
+
+    expect(spy).toHaveBeenCalledTimes(2);
+    expect(spy.mock.calls[0][0]).toContain("unavailable in this runtime");
+    expect(spy.mock.calls[1][0]).toContain('Route "GET /b"');
+    expect(spy.mock.calls[1][0]).toContain("malformed");
+    spy.mockRestore();
+  });
 });
