@@ -40,12 +40,15 @@ export type MoneyParser = (amount: number, network: Network) => Promise<AssetAmo
  * with server-declared extensions in the final PaymentPayload.
  *
  * This type intentionally omits `accepted` (the `PaymentRequirements` the payload
- * satisfies). The scheme already received `paymentRequirements` as an argument, so
- * `x402Client.createPaymentPayload()` merges it back in (as `accepted`) after calling
- * the scheme, producing the full `PaymentPayload`. Code that calls a scheme's
- * `createPaymentPayload()` directly instead of going through `x402Client` must add
- * `accepted: paymentRequirements` itself before treating the result as a `PaymentPayload`
- * (e.g. before passing it to a facilitator's `verify()`/`settle()`).
+ * satisfies) and `resource` (the `ResourceInfo` from `PaymentRequired`). The scheme
+ * already received `paymentRequirements` as an argument, so for x402 v2,
+ * `x402Client.createPaymentPayload()` fills both back in (`accepted` and `resource`)
+ * after calling the scheme, producing the full `PaymentPayload`. v1 payloads are
+ * passed through unchanged and carry no `accepted` or `resource`. Code that calls a
+ * scheme's `createPaymentPayload()` directly instead of going through `x402Client`
+ * must add `accepted: paymentRequirements` (and `resource`, for v2) itself before
+ * treating the result as a `PaymentPayload` (e.g. before passing it to a
+ * facilitator's `verify()`/`settle()`).
  */
 export type PaymentPayloadResult = Pick<PaymentPayload, "x402Version" | "payload"> & {
   extensions?: Record<string, unknown>;
