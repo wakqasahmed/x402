@@ -8,6 +8,7 @@ import {
   findMatchingRoute,
   processPriceToAtomicAmount,
   toJsonSafe,
+  warnLegacyDeprecation,
 } from "x402/shared";
 import { getPaywallHtml } from "x402/paywall";
 import {
@@ -24,23 +25,6 @@ import {
   SupportedSVMNetworks,
 } from "x402/types";
 import { useFacilitator } from "x402/verify";
-
-let hasWarnedLegacyDeprecation = false;
-
-/**
- * Warns once per process that this package is the frozen x402 protocol v1
- * implementation and does not speak the v2 "PAYMENT-REQUIRED" header dialect.
- */
-function warnLegacyDeprecation(): void {
-  if (hasWarnedLegacyDeprecation) return;
-  hasWarnedLegacyDeprecation = true;
-  console.warn(
-    '[x402-hono] DEPRECATED: "x402-hono" implements x402 protocol v1 and only emits ' +
-      'payment terms in the JSON response body. v2 clients read the "PAYMENT-REQUIRED" header ' +
-      'instead and will not be able to pay you. Please migrate to "@x402/hono": ' +
-      "https://www.npmjs.com/package/@x402/hono",
-  );
-}
 
 /**
  * Creates a payment middleware factory for Hono
@@ -95,7 +79,7 @@ export function paymentMiddleware(
   facilitator?: FacilitatorConfig,
   paywall?: PaywallConfig,
 ) {
-  warnLegacyDeprecation();
+  warnLegacyDeprecation("x402-hono", "@x402/hono", "server");
 
   const { verify, settle, supported } = useFacilitator(facilitator);
   const x402Version = 1;

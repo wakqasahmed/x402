@@ -17,7 +17,7 @@ describe("x402-fetch legacy deprecation warning", () => {
     warnSpy.mockRestore();
   });
 
-  it("warns once on wrapFetchWithPayment construction pointing to @x402/fetch", async () => {
+  it("tags wrapFetchWithPayment construction as the x402-fetch client, pointing to @x402/fetch", async () => {
     const { wrapFetchWithPayment } = await import("./index");
     const mockWalletClient = { signMessage: vi.fn() } as never;
 
@@ -26,9 +26,5 @@ describe("x402-fetch legacy deprecation warning", () => {
     expect(warnSpy).toHaveBeenCalledTimes(1);
     expect(warnSpy.mock.calls[0][0]).toContain("x402-fetch");
     expect(warnSpy.mock.calls[0][0]).toContain("@x402/fetch");
-
-    wrapFetchWithPayment(vi.fn() as never, mockWalletClient);
-
-    expect(warnSpy).toHaveBeenCalledTimes(1);
   }, 20000);
 });

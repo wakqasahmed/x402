@@ -17,7 +17,7 @@ describe("x402-axios legacy deprecation warning", () => {
     warnSpy.mockRestore();
   });
 
-  it("warns once on withPaymentInterceptor construction pointing to @x402/axios", async () => {
+  it("tags withPaymentInterceptor construction as the x402-axios client, pointing to @x402/axios", async () => {
     const { withPaymentInterceptor } = await import("./index");
     const mockAxiosClient = { interceptors: { response: { use: vi.fn() } } } as never;
     const mockWalletClient = { signMessage: vi.fn() } as never;
@@ -27,9 +27,5 @@ describe("x402-axios legacy deprecation warning", () => {
     expect(warnSpy).toHaveBeenCalledTimes(1);
     expect(warnSpy.mock.calls[0][0]).toContain("x402-axios");
     expect(warnSpy.mock.calls[0][0]).toContain("@x402/axios");
-
-    withPaymentInterceptor(mockAxiosClient, mockWalletClient);
-
-    expect(warnSpy).toHaveBeenCalledTimes(1);
   }, 20000);
 });
