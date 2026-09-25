@@ -1,6 +1,6 @@
 # Advanced x402 Client Examples
 
-Advanced patterns for x402 TypeScript clients demonstrating builder pattern registration, payment lifecycle hooks, and network preferences.
+Advanced patterns for x402 TypeScript clients demonstrating builder pattern registration, payment lifecycle hooks, network preferences, and spend controls.
 
 ```typescript
 import { x402Client, wrapFetchWithPayment } from "@x402/fetch";
@@ -38,7 +38,12 @@ cp .env-local .env
 
 and fill required environment variables:
 
+- `CARDANO_MNEMONIC` - Cardano wallet seed phrase for signing payments (optional)
+- `CARDANO_NETWORK` - Cardano network (optional, defaults to `cardano:preprod`)
+- `BLOCKFROST_PREPROD_URL` / `BLOCKFROST_PROJECT_ID` - Blockfrost endpoint + project id (required when `CARDANO_MNEMONIC` is set)
 - `APTOS_PRIVATE_KEY` - Aptos Ed25519 private key for Aptos payments (optional; `all-networks`)
+- `CASPER_PRIVATE_KEY` - Casper private key for Casper payments (optional; `all-networks`)
+- `CASPER_PRIVATE_KEY_ALGORITHM` - Casper private key algorithm, either `ed25519` (default) or `secp256k1` (optional; `all-networks`)
 - `CCD_PRIVATE_KEY` - Concordium Ed25519 private key for Concordium payments (optional; `all-networks`)
 - `CCD_ADDRESS` - Concordium account address for Concordium payments (optional; `all-networks`)
 - `EVM_PRIVATE_KEY` - Ethereum private key for EVM payments
@@ -67,6 +72,10 @@ pnpm dev
 ```
 
 ### Account Setup Instructions
+
+#### Cardano Testnet
+
+The client wallet must hold the asset it pays with. Get test ADA (tADA) for `cardano:preprod` (or `cardano:preview`) from the [Cardano testnets faucet](https://docs.cardano.org/cardano-testnets/tools/faucet/), and supply a Blockfrost project id via `BLOCKFROST_PROJECT_ID` + `BLOCKFROST_PREPROD_URL`. Use `asset: "lovelace"` for quick testing (fundable directly from the faucet); preprod **tUSDM** comes from the [tUSDM faucet](https://tusdm.moneta.global).
 
 #### Stellar Testnet
 
@@ -114,6 +123,12 @@ To create and fund an XRPL Testnet payer account:
 2. Keep the [base reserve](https://xrpl.org/docs/concepts/accounts/reserves) funded (currently 1 XRP; the faucet funding is more than enough). The `all-networks` example pays in XRP drops, so no further setup is needed.
 3. For issued-currency (IOU) payments, the payer needs a sufficient issued-currency balance, and the receiving account must hold a [trust line](https://xrpl.org/docs/concepts/tokens/fungible-tokens) to the issuer.
 
+#### Casper Testnet
+
+Create or reuse a dedicated Casper testnet account or wallet key, then fund any account that submits Casper transactions with testnet CSPR from the [CSPR.live testnet faucet](https://testnet.cspr.live/tools/faucet). CSPR is required for gas on Casper Testnet.
+
+Use [testnet.cspr.trade](https://testnet.cspr.trade) to get wrapped CSPR (WCSPR) or csprUSD for the client payments.
+
 ## Available Examples
 
 Each example demonstrates a specific advanced pattern:
@@ -124,6 +139,7 @@ Each example demonstrates a specific advanced pattern:
 | `builder-pattern` | `pnpm dev:builder-pattern` | Fine-grained network registration |
 | `hooks` | `pnpm dev:hooks` | Payment lifecycle hooks |
 | `preferred-network` | `pnpm dev:preferred-network` | Client-side network preferences |
+| `spend-controls` | `pnpm dev:spend-controls` | Default `$1` USD cap, `allowedAssets`, and per-asset caps |
 
 ## Testing the Examples
 
@@ -258,6 +274,41 @@ const response = await fetchWithPayment("http://localhost:4021/weather");
 
 - Prefer payments on specific chains
 - User preference settings in wallet UIs
+
+## Example: Spend Controls
+
+By default the client caps recognized pegged assets at `$1` and rejects everything else. Use `spendControls` to raise the cap or opt into non-default tokens (native XRP/CCD, custom ERC-20s).
+
+```typescript
+const client = x402Client.fromConfig({
+  schemes: [{ network: "eip155:*", client: new ExactEvmScheme(evmSigner) }],
+  spendControls: {
+    maxAmountPerPayment: "$1", // default USD cap on recognized pegged assets
+    allowedAssets: [
+      // opt-in non-default with atomic cap
+      { network: "eip155:*", asset: "0xCustomToken", maxAmountPerPayment: "2000000" },
+      // opt-in non-default uncapped
+      { network: "eip155:*", asset: "0xOtherToken" },
+      // override USD cap for a default asset by ticker (or on-chain id)
+      { network: "eip155:*", asset: "USDC", maxAmountPerPayment: "1000000" },
+    ],
+  },
+});
+```
+
+| Control | Purpose |
+| --- | --- |
+| `maxAmountPerPayment` | USD ceiling on recognized pegged assets (default `$1`). Set `false` to remove. |
+| `allowedAssets` | Opt-in for non-default tokens. List of `{ network, asset }` with optional atomic `maxAmountPerPayment`, or `true` to allow any asset. |
+| `spendControls: false` | Disable all spend controls. Use only for UI-confirmed flows (paywall). |
+
+Native assets (XRP, CCD, KTA, ETH, SOL, HBAR) are not in `DEFAULT_ASSETS`. The `all-networks` example opts into XRP and CCD via `allowedAssets` so those paths still run.
+
+**Use case:**
+
+- Bound spend against a malicious 402 or unbounded custom token
+- Allow a specific custom token without disabling the USD cap on stables
+- Override the cap for one ticker (e.g. PYUSD) without raising it globally
 
 ## Hook Best Practices
 

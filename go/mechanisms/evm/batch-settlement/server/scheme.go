@@ -54,6 +54,9 @@ type BatchSettlementEvmSchemeServerConfig struct {
 	// milliseconds, that may be trusted for local voucher verification.
 	// When zero, derived from WithdrawDelay (clamped between 30s and 5min).
 	OnchainStateTtlMs int64
+	// EnforceMinDeposit rejects deposits below the announced extra.minDeposit
+	// hint. Default false (hint only). The facilitator never enforces this.
+	EnforceMinDeposit bool
 }
 
 // BatchSettlementEvmScheme implements SchemeNetworkServer for batched settlement.
@@ -63,6 +66,7 @@ type BatchSettlementEvmScheme struct {
 	receiverAuthorizerSigner AuthorizerSigner
 	withdrawDelay            int
 	onchainStateTtlMs        int64
+	enforceMinDeposit        bool
 	moneyParsers             []x402.MoneyParser
 
 	// requestContexts maps a per-payment key to state carried across verify and
@@ -136,6 +140,7 @@ func NewBatchSettlementEvmScheme(receiverAddress string, config *BatchSettlement
 	var authSigner AuthorizerSigner
 	withdrawDelay := batchsettlement.MinWithdrawDelay
 	var onchainStateTtlMs int64
+	var enforceMinDeposit bool
 
 	if config != nil {
 		storage = config.Storage
@@ -144,6 +149,7 @@ func NewBatchSettlementEvmScheme(receiverAddress string, config *BatchSettlement
 			withdrawDelay = config.WithdrawDelay
 		}
 		onchainStateTtlMs = config.OnchainStateTtlMs
+		enforceMinDeposit = config.EnforceMinDeposit
 	}
 
 	if onchainStateTtlMs <= 0 {
@@ -160,6 +166,7 @@ func NewBatchSettlementEvmScheme(receiverAddress string, config *BatchSettlement
 		receiverAuthorizerSigner: authSigner,
 		withdrawDelay:            withdrawDelay,
 		onchainStateTtlMs:        onchainStateTtlMs,
+		enforceMinDeposit:        enforceMinDeposit,
 		moneyParsers:             []x402.MoneyParser{},
 		requestContexts:          make(map[string]*BatchSettlementRequestContext),
 	}
@@ -394,13 +401,30 @@ func (s *BatchSettlementEvmScheme) Scheme() string {
 	return batchsettlement.SchemeBatched
 }
 
-// GetAssetDecimals implements AssetDecimalsProvider.
-func (s *BatchSettlementEvmScheme) GetAssetDecimals(asset string, network x402.Network) int {
-	info, err := evm.GetAssetInfo(string(network), asset)
-	if err != nil || info == nil {
-		return 6
+// DefaultAssetTransferMethod returns the ATM used when extra.assetTransferMethod is absent.
+func (s *BatchSettlementEvmScheme) DefaultAssetTransferMethod() string {
+	return string(evm.AssetTransferMethodEIP3009)
+}
+
+// PaymentFlows returns ATM-keyed payment flow support for batch-settlement EVM.
+func (s *BatchSettlementEvmScheme) PaymentFlows() map[string]x402.PaymentFlowConfig {
+	auth := x402.PaymentFlowConfig{
+		Supported: []x402.PaymentFlowName{x402.PaymentFlowAuthorization},
+		Default:   x402.PaymentFlowAuthorization,
 	}
-	return info.Decimals
+	return map[string]x402.PaymentFlowConfig{
+		string(evm.AssetTransferMethodEIP3009): auth,
+		string(evm.AssetTransferMethodPermit2): auth,
+	}
+}
+
+// GetAssetDecimals implements AssetDecimalsProvider.
+func (s *BatchSettlementEvmScheme) GetAssetDecimals(asset string, network x402.Network) (int, bool) {
+	found := evm.FindDefaultAsset(asset, string(network))
+	if found == nil {
+		return 0, false
+	}
+	return found.Decimals, true
 }
 
 // RegisterMoneyParser registers a custom money parser.
@@ -422,6 +446,11 @@ func (s *BatchSettlementEvmScheme) GetReceiverAddress() string {
 // GetWithdrawDelay returns the configured withdraw delay.
 func (s *BatchSettlementEvmScheme) GetWithdrawDelay() int {
 	return s.withdrawDelay
+}
+
+// GetEnforceMinDeposit returns whether deposits below extra.minDeposit are rejected.
+func (s *BatchSettlementEvmScheme) GetEnforceMinDeposit() bool {
+	return s.enforceMinDeposit
 }
 
 // GetReceiverAuthorizerAddress returns the receiver authorizer's address.
@@ -489,7 +518,7 @@ func (s *BatchSettlementEvmScheme) ParsePrice(price x402.Price, network x402.Net
 		}
 	}
 
-	decimalAmount, err := parseMoneyToDecimal(price)
+	decimalAmount, symbol, err := x402.ParseMoney(price)
 	if err != nil {
 		return x402.AssetAmount{}, err
 	}
@@ -504,7 +533,7 @@ func (s *BatchSettlementEvmScheme) ParsePrice(price x402.Price, network x402.Net
 		}
 	}
 
-	return defaultMoneyConversion(decimalAmount, network)
+	return defaultMoneyConversion(decimalAmount, network, symbol)
 }
 
 // EnhancePaymentRequirements adds batched-specific fields to payment requirements.
@@ -580,6 +609,12 @@ func (s *BatchSettlementEvmScheme) EnhancePaymentRequirements(
 	if _, ok := requirements.Extra["withdrawDelay"]; !ok {
 		requirements.Extra["withdrawDelay"] = s.withdrawDelay
 	}
+
+	minDeposit, hintErr := s.ResolveMinDepositHint(requirements)
+	if hintErr != nil {
+		return requirements, hintErr
+	}
+	requirements.Extra["minDeposit"] = minDeposit
 
 	// Copy extensions from supportedKind
 	if supportedKind.Extra != nil {
@@ -701,8 +736,8 @@ func (s *BatchSettlementEvmScheme) SignClaimBatch(ctx context.Context, claims []
 // non-default settlement asset for this manager.
 func (s *BatchSettlementEvmScheme) CreateChannelManager(facilitator x402.FacilitatorClient, network x402.Network) *BatchSettlementChannelManager {
 	token := ""
-	if cfg, err := evm.GetNetworkConfig(string(network)); err == nil {
-		token = cfg.DefaultAsset.Address
+	if info, err := evm.GetDefaultAsset(string(network), ""); err == nil {
+		token = info.Asset
 	}
 	return NewBatchSettlementChannelManager(ChannelManagerConfig{
 		Scheme:      s,
@@ -728,72 +763,106 @@ func (s *BatchSettlementEvmScheme) DeleteSession(channelId string) error {
 	return s.storage.Delete(channelId)
 }
 
-// Helper functions
-
-func parseMoneyToDecimal(price x402.Price) (float64, error) {
-	switch v := price.(type) {
-	case string:
-		cleanPrice := strings.TrimSpace(v)
-		cleanPrice = strings.TrimPrefix(cleanPrice, "$")
-		cleanPrice = strings.TrimSpace(cleanPrice)
-		amount, err := strconv.ParseFloat(cleanPrice, 64)
-		if err != nil {
-			return 0, fmt.Errorf(ErrFailedToParsePrice+": '%s': %w", v, err)
-		}
-		return amount, nil
-	case float64:
-		return v, nil
-	case int:
-		return float64(v), nil
-	case int64:
-		return float64(v), nil
-	default:
-		return 0, fmt.Errorf(ErrUnsupportedPriceType+": %T", price)
+// ResolveMinDepositHint resolves the extra.minDeposit hint written on every 402.
+func (s *BatchSettlementEvmScheme) ResolveMinDepositHint(requirements types.PaymentRequirements) (string, error) {
+	amount, ok := new(big.Int).SetString(requirements.Amount, 10)
+	if !ok {
+		return "", fmt.Errorf("invalid amount: %s", requirements.Amount)
 	}
+
+	var routeOverride interface{}
+	if requirements.Extra != nil {
+		routeOverride = requirements.Extra["minDeposit"]
+	}
+
+	var configuredMin *big.Int
+	if override, isString := routeOverride.(string); isString {
+		if isAtomicMinDeposit(override) {
+			parsed, err := parseAtomicMinDeposit(override)
+			if err != nil {
+				return "", err
+			}
+			configuredMin = parsed
+		} else {
+			parsed, err := s.resolveRouteMoneyMinDeposit(override, requirements)
+			if err != nil {
+				return "", err
+			}
+			configuredMin = parsed
+		}
+	}
+
+	if configuredMin == nil {
+		return new(big.Int).Mul(amount, big.NewInt(int64(batchsettlement.DefaultServerMinDepositMultiplier))).String(), nil
+	}
+
+	if amount.Cmp(configuredMin) > 0 {
+		return amount.String(), nil
+	}
+	return configuredMin.String(), nil
 }
 
-func defaultMoneyConversion(amount float64, network x402.Network) (x402.AssetAmount, error) {
-	networkStr := string(network)
-	config, err := evm.GetNetworkConfig(networkStr)
+func (s *BatchSettlementEvmScheme) resolveRouteMoneyMinDeposit(money string, requirement types.PaymentRequirements) (*big.Int, error) {
+	defaultAsset := evm.FindDefaultAsset(requirement.Asset, string(requirement.Network))
+	if defaultAsset == nil {
+		return nil, fmt.Errorf(
+			"extra.minDeposit money values are only supported for default assets; use an integer atomic string for %s on %s",
+			requirement.Asset, requirement.Network,
+		)
+	}
+	parsed, _, err := x402.ParseMoney(money)
+	if err != nil {
+		return nil, err
+	}
+	atomic, err := x402.ConvertToTokenAmount(parsed, defaultAsset.Decimals)
+	if err != nil {
+		return nil, err
+	}
+	return parseAtomicMinDeposit(atomic)
+}
+
+func parseAtomicMinDeposit(amount string) (*big.Int, error) {
+	if !isAtomicMinDeposit(amount) {
+		return nil, fmt.Errorf("minDeposit must resolve to a positive integer")
+	}
+	value, ok := new(big.Int).SetString(amount, 10)
+	if !ok || value.Sign() <= 0 {
+		return nil, fmt.Errorf("minDeposit must resolve to a positive integer")
+	}
+	return value, nil
+}
+
+func isAtomicMinDeposit(amount string) bool {
+	if amount == "" {
+		return false
+	}
+	for i := 0; i < len(amount); i++ {
+		if amount[i] < '0' || amount[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// Helper functions
+
+func defaultMoneyConversion(amount string, network x402.Network, symbol string) (x402.AssetAmount, error) {
+	assetInfo, tokenAmount, err := evm.ConvertDefaultMoney(amount, string(network), symbol)
 	if err != nil {
 		return x402.AssetAmount{}, err
 	}
-	if config.DefaultAsset.Address == "" {
-		return x402.AssetAmount{}, fmt.Errorf("no default stablecoin for network %s", networkStr)
-	}
 
 	extra := map[string]interface{}{
-		// Token EIP-712 domain — see comment in GetExtra above for why both
-		// ERC-3009 and Permit2(+EIP-2612) paths need name/version.
-		"name":    config.DefaultAsset.Name,
-		"version": config.DefaultAsset.Version,
+		"name":    assetInfo.Name,
+		"version": assetInfo.Version,
 	}
-	if config.DefaultAsset.AssetTransferMethod != "" {
-		extra["assetTransferMethod"] = string(config.DefaultAsset.AssetTransferMethod)
-	}
-
-	oneUnit := float64(1)
-	for i := 0; i < config.DefaultAsset.Decimals; i++ {
-		oneUnit *= 10
-	}
-
-	if amount >= oneUnit && amount == float64(int64(amount)) {
-		return x402.AssetAmount{
-			Asset:  config.DefaultAsset.Address,
-			Amount: fmt.Sprintf("%.0f", amount),
-			Extra:  extra,
-		}, nil
-	}
-
-	amountStr := fmt.Sprintf("%.6f", amount)
-	parsedAmount, err := evm.ParseAmount(amountStr, config.DefaultAsset.Decimals)
-	if err != nil {
-		return x402.AssetAmount{}, fmt.Errorf(ErrFailedToConvertAmt+": %w", err)
+	if assetInfo.AssetTransferMethod != "" {
+		extra["assetTransferMethod"] = string(assetInfo.AssetTransferMethod)
 	}
 
 	return x402.AssetAmount{
-		Asset:  config.DefaultAsset.Address,
-		Amount: parsedAmount.String(),
+		Asset:  assetInfo.Asset,
+		Amount: tokenAmount,
 		Extra:  extra,
 	}, nil
 }

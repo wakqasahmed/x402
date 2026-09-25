@@ -6,6 +6,39 @@ type X402RetryConfig = InternalAxiosRequestConfig & { __is402Retry?: boolean };
 type AxiosHeaderRecord = Record<string, string>;
 
 /**
+ * Resolves the final absolute URL for an Axios 402 response.
+ *
+ * @param config - Original Axios request configuration
+ * @param axiosInstance - Axios instance used to serialize the request URL
+ * @param response - Axios error response, if present
+ * @returns Absolute request URL (prefers final URL after redirects)
+ */
+function resolveAxiosRequestUrl(
+  config: InternalAxiosRequestConfig,
+  axiosInstance: AxiosInstance,
+  response?: AxiosError["response"],
+): string {
+  const responseUrl =
+    (response?.request as { responseURL?: string } | undefined)?.responseURL ??
+    (response?.request as { res?: { responseUrl?: string } } | undefined)?.res?.responseUrl;
+
+  if (responseUrl) {
+    return responseUrl;
+  }
+
+  const url = config.url ?? "";
+  if (config.baseURL) {
+    try {
+      return new URL(axiosInstance.getUri(config)).href;
+    } catch {
+      return url || config.baseURL;
+    }
+  }
+
+  return axiosInstance.getUri(config);
+}
+
+/**
  * Clones Axios headers into a plain record so the caller's Axios instance can
  * normalize them for the retry request.
  *
@@ -147,7 +180,8 @@ export function wrapAxiosWithPayment(
         }
 
         // Run payment required hooks
-        const hookHeaders = await httpClient.handlePaymentRequired(paymentRequired);
+        const requestUrl = resolveAxiosRequestUrl(originalConfig, axiosInstance, error.response);
+        const hookHeaders = await httpClient.handlePaymentRequired(paymentRequired, requestUrl);
         if (hookHeaders) {
           const hookConfig = createX402RetryConfig(originalConfig);
           Object.entries(hookHeaders).forEach(([key, value]) => {

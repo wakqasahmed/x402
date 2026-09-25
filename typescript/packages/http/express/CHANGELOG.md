@@ -1,5 +1,80 @@
 # @x402/express Changelog
 
+## 2.27.0
+
+### Minor Changes
+
+- Updated dependencies [5d3a2b2](https://github.com/x402-foundation/x402/commit/5d3a2b2)
+  - @x402/core@2.27.0
+  - @x402/extensions@2.27.0
+  - @x402/paywall@2.27.0
+
+### Patch Changes
+
+- [5d3a2b2](https://github.com/x402-foundation/x402/commit/5d3a2b2): HTTP resource servers now match protected routes against both the escaped request path and the framework's decoded routing view, requiring payment if either matches. A literal route such as `GET /api/premium` could previously be reached unpaid by encoding its path separator (`/api%2Fpremium`) when the adapter only consulted the escaped path while the framework dispatched on the decoded one. ([#3542](https://github.com/x402-foundation/x402/pull/3542)) - Thanks [@PhilBot402](https://github.com/PhilBot402) and [@phdargen](https://github.com/phdargen)!
+
+## 2.26.0
+
+### Minor Changes
+
+- Updated dependencies [76fe973](https://github.com/x402-foundation/x402/commit/76fe973)
+- Updated dependencies [8ae5ff6](https://github.com/x402-foundation/x402/commit/8ae5ff6)
+  - @x402/core@2.26.0
+  - @x402/extensions@2.26.0
+  - @x402/paywall@2.26.0
+
+## 2.25.0
+
+### Minor Changes
+
+- Updated dependencies [a140d2b](https://github.com/x402-foundation/x402/commit/a140d2b)
+- Updated dependencies [1bc2ae8](https://github.com/x402-foundation/x402/commit/1bc2ae8)
+- Updated dependencies [299b9bc](https://github.com/x402-foundation/x402/commit/299b9bc)
+- Updated dependencies [bbcb974](https://github.com/x402-foundation/x402/commit/bbcb974)
+  - @x402/extensions@2.25.0
+  - @x402/core@2.25.0
+  - @x402/paywall@2.25.0
+
+### Patch Changes
+
+- [299b9bc](https://github.com/x402-foundation/x402/commit/299b9bc): Exit the process when eager facilitator sync fails with a permanent capability or route-configuration error, instead of staying up until the first paid request. Transient facilitator timeouts remain retryable. ([#3346](https://github.com/x402-foundation/x402/pull/3346)) - Thanks [@phdargen](https://github.com/phdargen)!
+
+## 2.24.0
+
+### Minor Changes
+
+- Updated dependencies [6557149](https://github.com/x402-foundation/x402/commit/6557149)
+  - @x402/paywall@2.24.0
+  - @x402/core@2.24.0
+  - @x402/extensions@2.24.0
+
+## 2.23.0
+
+### Minor Changes
+
+- Updated dependencies [79b6259](https://github.com/x402-foundation/x402/commit/79b6259)
+- Updated dependencies [4f58723](https://github.com/x402-foundation/x402/commit/4f58723)
+- Updated dependencies [ab1a31a](https://github.com/x402-foundation/x402/commit/ab1a31a)
+- Updated dependencies [c2612d3](https://github.com/x402-foundation/x402/commit/c2612d3)
+- Updated dependencies [656437e](https://github.com/x402-foundation/x402/commit/656437e)
+  - @x402/core@2.23.0
+  - @x402/paywall@2.23.0
+  - @x402/extensions@2.23.0
+
+## 2.22.0
+
+### Minor Changes
+
+- [db5da2e](https://github.com/x402-foundation/x402/commit/db5da2e): Validate unsupported `paymentFlow` / `assetTransferMethod` at HTTP server construction and MCP `createPaymentWrapper` when the scheme is registered, and return a generic internal error from HTTP adapters and MCP wrappers for unexpected failures instead of leaking internal error details to clients. ([#3053](https://github.com/x402-foundation/x402/pull/3053)) - Thanks [@phdargen](https://github.com/phdargen)!
+- [db5da2e](https://github.com/x402-foundation/x402/commit/db5da2e): Require ATM-keyed `paymentFlows` (and `defaultAssetTransferMethod`) on every `SchemeNetworkServer`. Core resolves ATM/flow from the table, rejects unsupported combinations, and always signals non-`authorization` `paymentFlow` on the 402 wire. All schemes currently declare `authorization` only. ([#3053](https://github.com/x402-foundation/x402/pull/3053)) - Thanks [@phdargen](https://github.com/phdargen)!
+- Updated dependencies [37412e7](https://github.com/x402-foundation/x402/commit/37412e7)
+- Updated dependencies [db5da2e](https://github.com/x402-foundation/x402/commit/db5da2e)
+- Updated dependencies [db5da2e](https://github.com/x402-foundation/x402/commit/db5da2e)
+- Updated dependencies [1601942](https://github.com/x402-foundation/x402/commit/1601942)
+  - @x402/core@2.22.0
+  - @x402/extensions@2.22.0
+  - @x402/paywall@2.22.0
+
 ## 2.21.0
 
 ### Minor Changes

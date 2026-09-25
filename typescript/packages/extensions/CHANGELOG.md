@@ -1,5 +1,59 @@
 # @x402/extensions Changelog
 
+## 2.27.0
+
+### Minor Changes
+
+- Updated dependencies [5d3a2b2](https://github.com/x402-foundation/x402/commit/5d3a2b2)
+  - @x402/core@2.27.0
+
+## 2.26.0
+
+### Minor Changes
+
+- Updated dependencies [76fe973](https://github.com/x402-foundation/x402/commit/76fe973)
+  - @x402/core@2.26.0
+- [8ae5ff6](https://github.com/x402-foundation/x402/commit/8ae5ff6): `isValidRouteTemplate` now decodes a routeTemplate to a fixed point (up to a bounded pass budget) before running its traversal/scheme-injection checks, instead of a single decode pass. A double- or deeper-encoded payload (`%252e%252e`, `%253a%252f%252f`, ...) previously survived one decode still percent-encoded and slipped past the `..`/`://` checks, letting a malicious routeTemplate cause the facilitator to catalog a payment under an arbitrary URL. ([#3213](https://github.com/x402-foundation/x402/pull/3213)) - Thanks [@ygd58](https://github.com/ygd58)!
+
+## 2.25.0
+
+### Minor Changes
+
+- [a140d2b](https://github.com/x402-foundation/x402/commit/a140d2b): Bazaar discovery no longer emits a `routeTemplate` for bare wildcard (`*`) route patterns. Previously the auto-generated `:var1` template failed facilitator's required `matches_resource` check, so Next.js resources using the default `withX402()` wildcard registration were never indexed. ([#3309](https://github.com/x402-foundation/x402/pull/3309)) - Thanks [@phdargen](https://github.com/phdargen)!
+- Updated dependencies [1bc2ae8](https://github.com/x402-foundation/x402/commit/1bc2ae8)
+- Updated dependencies [299b9bc](https://github.com/x402-foundation/x402/commit/299b9bc)
+- Updated dependencies [bbcb974](https://github.com/x402-foundation/x402/commit/bbcb974)
+  - @x402/core@2.25.0
+
+## 2.24.0
+
+### Minor Changes
+
+- Updated dependencies
+  - @x402/core@2.24.0
+
+## 2.23.0
+
+### Minor Changes
+
+- [c2612d3](https://github.com/x402-foundation/x402/commit/c2612d3): Require SIWX client origin binding before signing. `x402HTTPClient.handlePaymentRequired` now accepts the response URL and passes it to hooks via `PaymentRequiredContext.requestUrl`. **`createSIWxPayload(serverExtension, signer, requestUrl)`** — new required third argument: the final URL of the 402 response (after redirects). Callers that previously invoked `createSIWxPayload(info, signer)` must pass the response URL; signing is refused when challenge `domain` or `uri` origin does not match that URL's origin. ([#3133](https://github.com/x402-foundation/x402/pull/3133)) - Thanks [@phdargen](https://github.com/phdargen)!
+- Updated dependencies [79b6259](https://github.com/x402-foundation/x402/commit/79b6259)
+- Updated dependencies [4f58723](https://github.com/x402-foundation/x402/commit/4f58723)
+- Updated dependencies [ab1a31a](https://github.com/x402-foundation/x402/commit/ab1a31a)
+- Updated dependencies [c2612d3](https://github.com/x402-foundation/x402/commit/c2612d3)
+- Updated dependencies [656437e](https://github.com/x402-foundation/x402/commit/656437e)
+  - @x402/core@2.23.0
+
+## 2.22.0
+
+### Minor Changes
+
+- Updated dependencies [37412e7](https://github.com/x402-foundation/x402/commit/37412e7)
+- Updated dependencies [db5da2e](https://github.com/x402-foundation/x402/commit/db5da2e)
+- Updated dependencies [db5da2e](https://github.com/x402-foundation/x402/commit/db5da2e)
+- Updated dependencies [1601942](https://github.com/x402-foundation/x402/commit/1601942)
+  - @x402/core@2.22.0
+
 ## 2.21.0
 
 ### Minor Changes

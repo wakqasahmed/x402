@@ -1,7 +1,24 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, afterEach } from "vitest";
+
+const mockTransactionApis = vi.hoisted(() => ({
+  verifySignature: vi.fn(),
+  sign: vi.fn(),
+  toJSON: vi.fn(),
+}));
+
+vi.mock("@concordium/web-sdk/transactions", async importOriginal => {
+  const actual = await importOriginal<typeof import("@concordium/web-sdk/transactions")>();
+  return {
+    Transaction: Object.assign({}, actual.Transaction, mockTransactionApis),
+  };
+});
+
 import { ExactConcordiumScheme as ExactConcordiumServer } from "../../src/exact/server/scheme";
 import { ExactConcordiumScheme as ExactConcordiumFacilitator } from "../../src/exact/facilitator/scheme";
 import { ExactConcordiumScheme as ExactConcordiumClient } from "../../src/exact/client/scheme";
+import { ExactConcordiumScheme as ExactConcordiumClientFromIndex } from "../../src/exact/client";
+import { ExactConcordiumScheme as ExactConcordiumFacilitatorFromIndex } from "../../src/exact/facilitator";
+import { ExactConcordiumScheme as ExactConcordiumServerFromIndex } from "../../src/exact/server";
 import {
   CONCORDIUM_MAINNET_CAIP2,
   CONCORDIUM_TESTNET_CAIP2,
@@ -15,6 +32,7 @@ import {
 } from "../../src";
 import type { PaymentRequirements } from "@x402/core/types";
 import type { FacilitatorConcordiumSigner } from "../../src";
+import { convertToTokenAmount } from "@x402/core/utils";
 
 function createMockFacilitatorSigner(
   address = "4FmiTW2L4RvCsSVTjFAavYvrgnPLGNj43eiwPYmbhNqtAcMbWW",
@@ -36,6 +54,9 @@ describe("@x402/concordium", () => {
     it("should export scheme classes", () => {
       expect(ExactConcordiumServer).toBeDefined();
       expect(ExactConcordiumFacilitator).toBeDefined();
+      expect(ExactConcordiumClientFromIndex).toBe(ExactConcordiumClient);
+      expect(ExactConcordiumFacilitatorFromIndex).toBe(ExactConcordiumFacilitator);
+      expect(ExactConcordiumServerFromIndex).toBe(ExactConcordiumServer);
     });
 
     it("should export constants", () => {
@@ -58,6 +79,16 @@ describe("@x402/concordium", () => {
     it("should have scheme property set to exact", () => {
       const server = new ExactConcordiumServer();
       expect(server.scheme).toBe("exact");
+    });
+
+    describe("paymentFlows", () => {
+      it("declares authorization and upfront with authorization as the default", () => {
+        const server = new ExactConcordiumServer();
+        expect(server.defaultAssetTransferMethod).toBe("default");
+        expect(server.paymentFlows).toEqual({
+          default: { supported: ["authorization", "upfront"], default: "authorization" },
+        });
+      });
     });
 
     it("should inject feePayer from supported kind into payment requirements", async () => {
@@ -165,24 +196,26 @@ describe("@x402/concordium", () => {
       ).rejects.toThrow("Asset must be specified");
     });
 
-    it("should throw when raw number has no registered money parser", async () => {
+    it("should parse USD prices to USDR by default", async () => {
       const server = new ExactConcordiumServer();
-      await expect(server.parsePrice("10", CONCORDIUM_TESTNET_CAIP2)).rejects.toThrow(
-        "Cannot resolve price",
-      );
+      const result = await server.parsePrice("$0.001", CONCORDIUM_TESTNET_CAIP2);
+
+      expect(result.amount).toBe("1000");
+      expect(result.asset).toBe("USDR");
     });
 
-    it("should throw when USD price has no registered money parser", async () => {
+    it("should parse a raw number to USDR by default", async () => {
       const server = new ExactConcordiumServer();
-      await expect(server.parsePrice("$0.001", CONCORDIUM_TESTNET_CAIP2)).rejects.toThrow(
-        "Cannot resolve price",
-      );
+      const result = await server.parsePrice("10", CONCORDIUM_TESTNET_CAIP2);
+
+      expect(result.amount).toBe("10000000");
+      expect(result.asset).toBe("USDR");
     });
 
     it("should allow USD prices when a money parser is registered", async () => {
       const server = new ExactConcordiumServer();
       server.registerMoneyParser(async amount => ({
-        amount: String(Math.round(amount * 1e6)),
+        amount: convertToTokenAmount(String(amount), 6),
         asset: "EURR",
         extra: {},
       }));
@@ -240,7 +273,7 @@ describe("@x402/concordium", () => {
       });
       server.registerMoneyParser(async amount => {
         callOrder.push(2);
-        return { amount: String(amount * 1e6), asset: "EURR", extra: {} };
+        return { amount: convertToTokenAmount(String(amount), 6), asset: "EURR", extra: {} };
       });
       server.registerMoneyParser(async amount => {
         callOrder.push(3); // should never be called
@@ -252,14 +285,21 @@ describe("@x402/concordium", () => {
       expect(callOrder).toEqual([1, 2]); // third parser never reached
     });
 
-    it("should throw when all money parsers return null", async () => {
+    it("should fall through to USDR when all money parsers return null", async () => {
       const server = new ExactConcordiumServer();
       server.registerMoneyParser(async () => null);
       server.registerMoneyParser(async () => null);
 
-      await expect(server.parsePrice("5", CONCORDIUM_TESTNET_CAIP2)).rejects.toThrow(
-        "Cannot resolve price",
-      );
+      const result = await server.parsePrice("5", CONCORDIUM_TESTNET_CAIP2);
+      expect(result.amount).toBe("5000000");
+      expect(result.asset).toBe("USDR");
+    });
+
+    it("returns 6 decimals for USDR and undefined for CCD or EURR", () => {
+      const server = new ExactConcordiumServer();
+      expect(server.getAssetDecimals("USDR", CONCORDIUM_TESTNET_CAIP2)).toBe(6);
+      expect(server.getAssetDecimals("CCD", CONCORDIUM_TESTNET_CAIP2)).toBeUndefined();
+      expect(server.getAssetDecimals("EURR", CONCORDIUM_TESTNET_CAIP2)).toBeUndefined();
     });
 
     it("should preserve extra fields from AssetAmount in parsePrice", async () => {
@@ -1878,6 +1918,100 @@ describe("@x402/concordium", () => {
         const grpcClient = (client as any).createGrpcClient(CONCORDIUM_TESTNET_CAIP2);
 
         expect(grpcClient).toBeDefined();
+      });
+    });
+
+    describe("createPaymentPayload", () => {
+      afterEach(() => {
+        vi.restoreAllMocks();
+      });
+
+      function mockGrpcForClient(client: ExactConcordiumClient, options?: { decimals?: number }) {
+        const mockGrpcClient = {
+          getNextAccountNonce: vi.fn().mockResolvedValue({ nonce: 7n }),
+          getTokenInfo: vi.fn().mockResolvedValue({ state: { decimals: options?.decimals ?? 6 } }),
+        };
+        vi.spyOn(client as any, "createGrpcClient").mockReturnValue(mockGrpcClient);
+        return mockGrpcClient;
+      }
+
+      it("should reject maxTimeoutSeconds <= 5", async () => {
+        const client = new ExactConcordiumClient(createMockClientSigner());
+        mockGrpcForClient(client);
+        await expect(
+          client.createPaymentPayload(2, {
+            scheme: "exact",
+            network: CONCORDIUM_TESTNET_CAIP2,
+            asset: "CCD",
+            amount: "1000",
+            payTo: validAddress,
+            maxTimeoutSeconds: 5,
+            extra: { feePayer: validAddress },
+          }),
+        ).rejects.toThrow("requirements.maxTimeoutSeconds must be an integer greater than 5");
+      });
+
+      it("should build and sign a native CCD payment payload", async () => {
+        const client = new ExactConcordiumClient(createMockClientSigner());
+        mockGrpcForClient(client);
+        mockTransactionApis.sign.mockResolvedValue({ signed: true } as any);
+        mockTransactionApis.toJSON.mockReturnValue({
+          version: 1,
+          header: { nonce: 7n, numSignatures: 1, executionEnergyAmount: 1000n },
+          payload: { type: "transfer" },
+          signatures: { sender: { "0": { "0": "sig" } } },
+        } as any);
+
+        const result = await client.createPaymentPayload(2, {
+          scheme: "exact",
+          network: CONCORDIUM_TESTNET_CAIP2,
+          asset: "CCD",
+          amount: "1000000",
+          payTo: validAddress,
+          maxTimeoutSeconds: 60,
+          extra: { feePayer: validAddress },
+        });
+
+        expect(result.x402Version).toBe(2);
+        expect(result.payload).toEqual({
+          signedTransaction: {
+            version: 1,
+            header: { nonce: 7, numSignatures: 1, executionEnergyAmount: 1000 },
+            payload: { type: "transfer" },
+            signatures: { sender: { "0": { "0": "sig" } } },
+          },
+        });
+      });
+
+      it("should fetch token decimals from chain for PLT payments", async () => {
+        const client = new ExactConcordiumClient(createMockClientSigner());
+        const mockGrpcClient = mockGrpcForClient(client, { decimals: 8 });
+        const buildPltSpy = vi.spyOn(client as any, "buildPltTransfer").mockReturnValue({
+          addMetadata: vi.fn().mockReturnThis(),
+          addSponsor: vi.fn().mockReturnThis(),
+          build: vi.fn().mockReturnValue({ built: true }),
+        });
+        mockTransactionApis.sign.mockResolvedValue({ signed: true } as any);
+        mockTransactionApis.toJSON.mockReturnValue({
+          version: 1,
+          header: { nonce: 7n },
+          payload: { type: "tokenUpdate", tokenId: "USDR" },
+          signatures: { sender: { "0": { "0": "sig" } } },
+        } as any);
+
+        const result = await client.createPaymentPayload(2, {
+          scheme: "exact",
+          network: CONCORDIUM_TESTNET_CAIP2,
+          asset: "USDR",
+          amount: "2500000",
+          payTo: validAddress,
+          maxTimeoutSeconds: 60,
+          extra: { feePayer: validAddress },
+        });
+
+        expect(mockGrpcClient.getTokenInfo).toHaveBeenCalled();
+        expect(buildPltSpy).toHaveBeenCalledWith(validAddress, "2500000", "USDR", 8);
+        expect(result.payload).toBeDefined();
       });
     });
   });

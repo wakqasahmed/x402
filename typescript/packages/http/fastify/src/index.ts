@@ -9,6 +9,7 @@ import {
   FacilitatorClient,
   FacilitatorResponseError,
   getFacilitatorResponseError,
+  attachBackgroundInitHandler,
   SETTLEMENT_OVERRIDES_HEADER,
   SettlementOverrides,
   checkIfBazaarNeeded,
@@ -229,6 +230,20 @@ function sendInternalError(reply: FastifyReply, error: unknown): void {
 }
 
 /**
+ * Decode percent-escapes in a request path.
+ *
+ * @param path - Request path
+ * @returns Decoded path, or the original if decoding fails
+ */
+function decodedRoutePath(path: string): string {
+  try {
+    return decodeURIComponent(path);
+  } catch {
+    return path;
+  }
+}
+
+/**
  * Configuration for registering a payment scheme with a specific network.
  */
 export interface SchemeRegistration {
@@ -282,11 +297,11 @@ export function paymentMiddlewareFromHTTPServer(
   app.decorateRequest("x402RawGuard", undefined);
 
   let initPromise: Promise<void> | null = syncFacilitatorOnStart ? httpServer.initialize() : null;
-  // Attach a no-op rejection handler so an early failure (e.g. a facilitator
-  // request timeout) cannot become an unhandled rejection before the first
-  // protected request awaits initPromise. The original promise is kept, so that
-  // request still observes the failure and triggers the retry path.
-  void initPromise?.catch(() => {});
+  // Retryable failures (e.g. a facilitator timeout) must not become unhandled
+  // rejections; the original promise is still awaited on the first protected
+  // request. Fatal capability / route mismatches exit the process so a
+  // misconfigured server does not stay up until that request.
+  attachBackgroundInitHandler(initPromise);
   let isInitialized = false;
 
   /**
@@ -335,6 +350,7 @@ export function paymentMiddlewareFromHTTPServer(
     const context: HTTPRequestContext = {
       adapter,
       path,
+      decodedPath: decodedRoutePath(path),
       method: request.method,
       paymentHeader:
         (request.headers["payment-signature"] as string | undefined) ||
@@ -442,23 +458,21 @@ export function paymentMiddlewareFromHTTPServer(
     }
 
     if (reply.statusCode >= 400) {
-      await x402Context.cancellationDispatcher.cancel({
+      const cancelSettlement = await x402Context.cancellationDispatcher.cancel({
         reason: "handler_failed",
         responseStatus: reply.statusCode,
       });
       reply.removeHeader(SETTLEMENT_OVERRIDES_HEADER);
-      // Echo before-handler receipt (e.g. upfront) so the payer still gets the tx hash
-      if (x402Context.beforeHandlerSettlement) {
-        const existingCacheControl =
-          reply.getHeader("Cache-Control") != null
-            ? String(reply.getHeader("Cache-Control"))
-            : null;
-        for (const [key, value] of Object.entries(
-          httpServer.createCompletedSettlementHeaders(
-            x402Context.beforeHandlerSettlement,
-            existingCacheControl,
-          ),
-        )) {
+      const existingCacheControl =
+        reply.getHeader("Cache-Control") != null ? String(reply.getHeader("Cache-Control")) : null;
+      const failureHeaders = httpServer.createFailurePathSettlementHeaders(
+        cancelSettlement,
+        x402Context.beforeHandlerSettlement,
+        x402Context.paymentPayload,
+        existingCacheControl,
+      );
+      if (failureHeaders) {
+        for (const [key, value] of Object.entries(failureHeaders)) {
           reply.header(key, value);
         }
       }

@@ -7,16 +7,18 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import re
 from collections.abc import Awaitable, Callable, Generator
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Any, Literal, TypedDict
 
 from typing_extensions import Self
 
 from .hook_adapters import collect_client_scheme_hook_handles, get_labeled_client_hooks
-from .interfaces import SchemeNetworkClient, SchemeNetworkClientV1
+from .interfaces import PaymentPayloadContext, SchemeNetworkClient, SchemeNetworkClientV1
 from .schemas import (
     AbortResult,
+    Money,
     Network,
     NoMatchingRequirementsError,
     PaymentCreatedContext,
@@ -34,8 +36,10 @@ from .schemas import (
     ResourceInfo,
     SchemeNotFoundError,
     find_schemes_by_network,
+    matches_network_pattern,
 )
 from .schemas.extensions import ClientExtension
+from .schemas.helpers import convert_to_token_amount, parse_money
 from .server_base import _ADDITIVE_LIST_INFO_FIELDS
 
 # ============================================================================
@@ -176,6 +180,93 @@ PaymentRequirementsSelector = Callable[[int, list[RequirementsView]], Requiremen
 # ============================================================================
 
 
+# Default USD cap for recognized default assets. Override via SpendControls.
+DEFAULT_MAX_AMOUNT_PER_PAYMENT: Money = "$1"
+
+_ATOMIC_AMOUNT = re.compile(r"^\d+$")
+
+
+class _SpendControlAssetRequired(TypedDict):
+    network: Network
+    asset: str
+
+
+class SpendControlAsset(_SpendControlAssetRequired, total=False):
+    """Opt-in asset for SpendControls.allowed_assets.
+
+    Default assets are always allowed; list non-default tokens here (and optional
+    integer atomic caps, e.g. ``"2000000"``, not ``"$1"``).
+    """
+
+    max_amount_per_payment: str
+
+
+class SpendControls(TypedDict, total=False):
+    """Client spend controls (enforced before policies).
+
+    By default only assets ``find_default_asset`` recognizes are allowed, capped at
+    ``DEFAULT_MAX_AMOUNT_PER_PAYMENT``. Pass ``spend_controls=False`` to disable
+    all spend controls (any asset, no caps).
+    """
+
+    max_amount_per_payment: Money | Literal[False]
+    allowed_assets: Literal[True] | list[SpendControlAsset]
+
+
+def _is_atomic_amount(amount: str) -> bool:
+    """Return whether ``amount`` is an integer atomic string."""
+    return bool(_ATOMIC_AMOUNT.fullmatch(amount))
+
+
+def _find_spend_control_asset_entry(
+    controls: SpendControls,
+    network: str,
+    asset: str,
+    default_asset: dict[str, Any] | None,
+) -> SpendControlAsset | None:
+    """Find the matching ``allowed_assets`` entry for a requirement."""
+    if controls.get("allowed_assets") is True:
+        return None
+    for entry in controls.get("allowed_assets") or []:
+        if not matches_network_pattern(network, entry["network"]):
+            continue
+        if entry["asset"].lower() == asset.lower():
+            return entry
+        if default_asset is not None and default_asset["symbol"].lower() == entry["asset"].lower():
+            return entry
+    return None
+
+
+def _resolve_atomic_spend_cap(
+    controls: SpendControls | Literal[False],
+    network: str,
+    asset: str,
+    default_asset: dict[str, Any] | None,
+) -> str | None:
+    """Resolve the atomic spend cap for filtering and payload context.
+
+    Returns ``None`` when the payment is uncapped.
+    """
+    if controls is False:
+        return None
+
+    asset_entry = _find_spend_control_asset_entry(controls, network, asset, default_asset)
+    if asset_entry is not None and asset_entry.get("max_amount_per_payment") is not None:
+        cap = asset_entry["max_amount_per_payment"]
+        if not _is_atomic_amount(cap):
+            raise ValueError(
+                "spend_controls.allowed_assets[].max_amount_per_payment must be an "
+                f"integer atomic amount, not a dollar value; got {cap!r}"
+            )
+        return cap
+
+    if not default_asset or controls.get("max_amount_per_payment") is False:
+        return None
+
+    usd_limit = controls.get("max_amount_per_payment", DEFAULT_MAX_AMOUNT_PER_PAYMENT)
+    return convert_to_token_amount(parse_money(usd_limit)["amount"], default_asset["decimals"])
+
+
 @dataclass
 class SchemeRegistration:
     """Configuration for registering a payment scheme with a specific network."""
@@ -191,6 +282,7 @@ class x402ClientConfig:
 
     schemes: list[SchemeRegistration]
     policies: list[PaymentPolicy] | None = None
+    spend_controls: SpendControls | Literal[False] | None = None
     payment_requirements_selector: PaymentRequirementsSelector | None = field(default=None)
 
 
@@ -292,6 +384,7 @@ class x402ClientBase:
         self._schemes: dict[Network, dict[str, SchemeNetworkClient]] = {}
         self._schemes_v1: dict[Network, dict[str, SchemeNetworkClientV1]] = {}
         self._policies: list[PaymentPolicy] = []
+        self._spend_controls: SpendControls | Literal[False] = {}
         self._registered_extensions: dict[str, ClientExtension] = {}
         self._scheme_client_hook_adapters: dict[int, dict[Network, dict[str, Any]]] = {}
 
@@ -366,6 +459,15 @@ class x402ClientBase:
         self._policies.append(policy)
         return self
 
+    def set_spend_controls(self, controls: SpendControls | Literal[False]) -> Self:
+        """Replace spend controls. Pass ``False`` to disable all spend controls.
+
+        When an object is passed, omitted ``max_amount_per_payment`` still defaults to
+        ``DEFAULT_MAX_AMOUNT_PER_PAYMENT``.
+        """
+        self._spend_controls = controls
+        return self
+
     # ========================================================================
     # Selection (Shared)
     # ========================================================================
@@ -385,12 +487,30 @@ class x402ClientBase:
         if not supported:
             raise NoMatchingRequirementsError("No payment requirements match registered schemes")
 
-        # Apply policies
-        filtered: list[RequirementsView] = list(supported)
+        recognized: list[PaymentRequirements] = []
+        for req in supported:
+            flow = (req.extra or {}).get("paymentFlow")
+            if flow is None or flow in ("authorization", "upfront", "escrow"):
+                recognized.append(req)
+        if not recognized:
+            raise NoMatchingRequirementsError(
+                "No payment requirements with a recognized paymentFlow for x402 version: 2"
+            )
+
+        # Enforce spend controls, then apply policies
+        filtered: list[RequirementsView] = self._apply_spend_controls(2, recognized, self._schemes)
         for policy in self._policies:
             filtered = policy(2, filtered)
             if not filtered:
                 raise NoMatchingRequirementsError("All requirements filtered out by policies")
+
+        authorization_accepts = [
+            req
+            for req in filtered
+            if (req.extra or {}).get("paymentFlow") in (None, "authorization")
+        ]
+        if authorization_accepts:
+            filtered = authorization_accepts
 
         # Select final
         return self._selector(2, filtered)  # type: ignore[return-value]
@@ -410,8 +530,10 @@ class x402ClientBase:
         if not supported:
             raise NoMatchingRequirementsError("No payment requirements match registered schemes")
 
-        # Apply policies
-        filtered: list[RequirementsView] = list(supported)
+        # Enforce spend controls, then apply policies
+        filtered: list[RequirementsView] = self._apply_spend_controls(
+            1, supported, self._schemes_v1
+        )
         for policy in self._policies:
             filtered = policy(1, filtered)
             if not filtered:
@@ -419,6 +541,141 @@ class x402ClientBase:
 
         # Select final
         return self._selector(1, filtered)  # type: ignore[return-value]
+
+    def _apply_spend_controls(
+        self,
+        x402_version: int,
+        requirements: list[RequirementsView],
+        client_schemes_by_network: dict[Network, dict[str, Any]],
+    ) -> list[RequirementsView]:
+        """Filter by spend controls (default-asset allowlist → opt-in assets → caps).
+
+        Keeps any accept that fits so a mixed offer can still pay the affordable option.
+        """
+        controls = self._spend_controls
+        if controls is False:
+            return list(requirements)
+
+        def raw_amount_of(requirement: RequirementsView) -> str:
+            return requirement.get_amount()
+
+        def scheme_for(requirement: RequirementsView) -> Any:
+            schemes = find_schemes_by_network(client_schemes_by_network, requirement.network)
+            if schemes is None:
+                return None
+            return schemes.get(requirement.scheme)
+
+        def default_asset_for(requirement: RequirementsView) -> dict[str, Any] | None:
+            scheme = scheme_for(requirement)
+            finder = getattr(scheme, "find_default_asset", None) if scheme is not None else None
+            if not callable(finder):
+                return None
+            return finder(requirement.asset, requirement.network)
+
+        allow_any_asset = controls.get("allowed_assets") is True
+
+        def find_asset_entry(requirement: RequirementsView) -> SpendControlAsset | None:
+            return _find_spend_control_asset_entry(
+                controls,
+                requirement.network,
+                requirement.asset,
+                default_asset_for(requirement),
+            )
+
+        if allow_any_asset:
+            filtered = list(requirements)
+        else:
+            filtered = [
+                requirement
+                for requirement in requirements
+                if default_asset_for(requirement) is not None
+                or find_asset_entry(requirement) is not None
+            ]
+        if not filtered:
+            raise NoMatchingRequirementsError(
+                "All payment requirements were rejected by spend_controls: only default assets "
+                "or entries in spend_controls.allowed_assets are allowed. Add an allowed_assets "
+                "entry for non-default tokens, set allowed_assets: True, or set spend_controls: False."
+            )
+
+        usd_limit: Money | Literal[False]
+        if controls.get("max_amount_per_payment") is False:
+            usd_limit = False
+        else:
+            usd_limit = controls.get("max_amount_per_payment", DEFAULT_MAX_AMOUNT_PER_PAYMENT)
+
+        before_amount_caps = filtered
+        rejected_by_asset_cap = False
+        rejected_usd_symbol: str | None = None
+
+        kept: list[RequirementsView] = []
+        for requirement in filtered:
+            default_asset = default_asset_for(requirement)
+            asset_entry = _find_spend_control_asset_entry(
+                controls, requirement.network, requirement.asset, default_asset
+            )
+            cap = _resolve_atomic_spend_cap(
+                controls, requirement.network, requirement.asset, default_asset
+            )
+            if cap is None:
+                kept.append(requirement)
+                continue
+
+            raw_amount = raw_amount_of(requirement)
+            if not _is_atomic_amount(raw_amount):
+                if (
+                    asset_entry is not None
+                    and asset_entry.get("max_amount_per_payment") is not None
+                ):
+                    rejected_by_asset_cap = True
+                    continue
+                # Decimal ledger value (e.g. XRPL IOU "0.01") — 1:1 USD vs the Money cap.
+                if usd_limit is False:
+                    kept.append(requirement)
+                    continue
+                value_scaled = int(convert_to_token_amount(raw_amount, 18))
+                cap_scaled = int(convert_to_token_amount(parse_money(usd_limit)["amount"], 18))
+                ok = value_scaled <= cap_scaled
+                if not ok:
+                    rejected_usd_symbol = default_asset["symbol"] if default_asset else None
+                else:
+                    kept.append(requirement)
+                continue
+
+            ok = int(raw_amount) <= int(cap)
+            if not ok:
+                if (
+                    asset_entry is not None
+                    and asset_entry.get("max_amount_per_payment") is not None
+                ):
+                    rejected_by_asset_cap = True
+                elif default_asset:
+                    rejected_usd_symbol = default_asset["symbol"]
+            else:
+                kept.append(requirement)
+
+        filtered = kept
+        if not filtered:
+            if rejected_by_asset_cap and all(
+                (entry := find_asset_entry(requirement)) is not None
+                and entry.get("max_amount_per_payment") is not None
+                for requirement in before_amount_caps
+            ):
+                raise NoMatchingRequirementsError(
+                    "All payment requirements were rejected by spend_controls.allowed_assets "
+                    "max_amount_per_payment. Raise the per-asset cap, or omit max_amount_per_payment "
+                    "to allow uncapped (default assets then fall back to the top-level USD cap)."
+                )
+            symbol_note = f", including {rejected_usd_symbol}" if rejected_usd_symbol else ""
+            raise NoMatchingRequirementsError(
+                f"All payment requirements were rejected by spend_controls.max_amount_per_payment "
+                f"({usd_limit}{symbol_note}). "
+                "Raise max_amount_per_payment, set it to False to disable, "
+                "set allowed_assets[].max_amount_per_payment for a per-asset atomic cap, "
+                "or set spend_controls: False to disable all spend controls."
+            )
+
+        return filtered
 
     # ========================================================================
     # Introspection
@@ -544,13 +801,28 @@ class x402ClientBase:
 
             client = schemes[selected.scheme]
 
-            # 5. Create inner payload (pass extensions for enrichment if scheme supports it)
+            # 5. Create inner payload (pass extensions + spend cap when the scheme
+            # accepts them).
             server_extensions = payment_required.extensions
+            finder = getattr(client, "find_default_asset", None)
+            default_asset = finder(selected.asset, selected.network) if callable(finder) else None
+            payload_context = PaymentPayloadContext(
+                extensions=server_extensions,
+                max_amount_per_payment=_resolve_atomic_spend_cap(
+                    self._spend_controls,
+                    selected.network,
+                    selected.asset,
+                    default_asset,
+                ),
+            )
             sig = inspect.signature(client.create_payment_payload)
+            kwargs: dict[str, Any] = {}
+            if "context" in sig.parameters:
+                kwargs["context"] = payload_context
             if "extensions" in sig.parameters:
-                inner_payload = client.create_payment_payload(
-                    selected, extensions=server_extensions
-                )
+                kwargs["extensions"] = server_extensions
+            if kwargs:
+                inner_payload = client.create_payment_payload(selected, **kwargs)
             else:
                 inner_payload = client.create_payment_payload(selected)
 

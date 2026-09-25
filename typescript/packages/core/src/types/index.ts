@@ -11,6 +11,7 @@ export {
   SettleError,
   FacilitatorResponseError,
   FacilitatorTimeoutError,
+  FacilitatorCapabilityError,
   getFacilitatorResponseError,
 } from "./facilitator";
 export type {
@@ -34,6 +35,10 @@ export type {
   PaymentFlowName,
   PaymentFlowPhases,
   PaymentFlowConfig,
+  DefaultAsset,
+  DefaultAssetTable,
+  GetDefaultAsset,
+  FindDefaultAsset,
 } from "./mechanisms";
 export type { PaymentRequirementsV1, PaymentRequiredV1, PaymentPayloadV1 } from "./v1";
 export type {

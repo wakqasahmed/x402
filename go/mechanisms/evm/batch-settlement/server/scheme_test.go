@@ -41,6 +41,9 @@ func TestNewBatchSettlementEvmScheme_NilConfigDefaults(t *testing.T) {
 	if s.GetStorage() == nil {
 		t.Fatal("expected default in-memory storage")
 	}
+	if s.GetEnforceMinDeposit() {
+		t.Fatal("enforceMinDeposit should default to false")
+	}
 	if s.Scheme() != batchsettlement.SchemeBatched {
 		t.Fatalf("scheme = %s", s.Scheme())
 	}
@@ -62,6 +65,13 @@ func TestNewBatchSettlementEvmScheme_OverridesApplied(t *testing.T) {
 	}
 	if s.GetStorage() != storage {
 		t.Fatalf("expected provided storage")
+	}
+}
+
+func TestNewBatchSettlementEvmScheme_EnforceMinDepositEnabled(t *testing.T) {
+	s := NewBatchSettlementEvmScheme("0xreceiver", &BatchSettlementEvmSchemeServerConfig{EnforceMinDeposit: true})
+	if !s.GetEnforceMinDeposit() {
+		t.Fatal("expected enforceMinDeposit true")
 	}
 }
 
@@ -131,7 +141,7 @@ func TestParsePrice_UnsupportedType(t *testing.T) {
 func TestRegisterMoneyParser_OverridesDefault(t *testing.T) {
 	s := NewBatchSettlementEvmScheme("0xreceiver", nil)
 	called := false
-	s.RegisterMoneyParser(func(_ float64, _ x402.Network) (*x402.AssetAmount, error) {
+	s.RegisterMoneyParser(func(_ string, _ x402.Network) (*x402.AssetAmount, error) {
 		called = true
 		return &x402.AssetAmount{Amount: "777", Asset: "0xcustom"}, nil
 	})
@@ -164,6 +174,9 @@ func TestEnhancePaymentRequirements_ExplicitAsset(t *testing.T) {
 	}
 	if out.Extra["withdrawDelay"] != 1800 {
 		t.Fatalf("withdrawDelay = %v", out.Extra["withdrawDelay"])
+	}
+	if out.Extra["minDeposit"] != "10000" {
+		t.Fatalf("minDeposit = %v", out.Extra["minDeposit"])
 	}
 }
 
@@ -235,6 +248,102 @@ func TestEnhancePaymentRequirements_PassesThroughAssetTransferMethod(t *testing.
 	}
 	if got, _ := out.Extra["assetTransferMethod"].(string); got != "permit2" {
 		t.Fatalf("expected assetTransferMethod=permit2 to pass through, got %q", got)
+	}
+}
+
+func TestEnhancePaymentRequirements_DefaultsMinDepositTo10xAmount(t *testing.T) {
+	s := NewBatchSettlementEvmScheme("0xreceiver", nil)
+	req := types.PaymentRequirements{
+		Network: "eip155:8453",
+		Asset:   "0x1234567890abcdef1234567890abcdef12345678",
+		Amount:  "2500",
+		Extra: map[string]interface{}{
+			"receiverAuthorizer": "0x4444444444444444444444444444444444444444",
+		},
+	}
+	out, err := s.EnhancePaymentRequirements(context.Background(), req, types.SupportedKind{}, nil)
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if out.Extra["minDeposit"] != "25000" {
+		t.Fatalf("minDeposit = %v", out.Extra["minDeposit"])
+	}
+}
+
+func TestEnhancePaymentRequirements_ConvertsRouteMinDepositMoneyOnDefaultAssets(t *testing.T) {
+	s := NewBatchSettlementEvmScheme("0xreceiver", nil)
+	req := types.PaymentRequirements{
+		Network: "eip155:8453",
+		Asset:   "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+		Amount:  "1000",
+		Extra: map[string]interface{}{
+			"receiverAuthorizer": "0x4444444444444444444444444444444444444444",
+			"minDeposit":         "$1",
+		},
+	}
+	out, err := s.EnhancePaymentRequirements(context.Background(), req, types.SupportedKind{}, nil)
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if out.Extra["minDeposit"] != "1000000" {
+		t.Fatalf("minDeposit = %v", out.Extra["minDeposit"])
+	}
+}
+
+func TestEnhancePaymentRequirements_UsesRequestAmountWhenItExceedsRouteMoney(t *testing.T) {
+	s := NewBatchSettlementEvmScheme("0xreceiver", nil)
+	req := types.PaymentRequirements{
+		Network: "eip155:8453",
+		Asset:   "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+		Amount:  "2000000",
+		Extra: map[string]interface{}{
+			"receiverAuthorizer": "0x4444444444444444444444444444444444444444",
+			"minDeposit":         "$1",
+		},
+	}
+	out, err := s.EnhancePaymentRequirements(context.Background(), req, types.SupportedKind{}, nil)
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if out.Extra["minDeposit"] != "2000000" {
+		t.Fatalf("minDeposit = %v", out.Extra["minDeposit"])
+	}
+}
+
+func TestEnhancePaymentRequirements_AcceptsAtomicMinDepositForAnyAsset(t *testing.T) {
+	s := NewBatchSettlementEvmScheme("0xreceiver", nil)
+	req := types.PaymentRequirements{
+		Network: "eip155:8453",
+		Asset:   "0x00000000000000000000000000000000000000aa",
+		Amount:  "1000",
+		Extra: map[string]interface{}{
+			"receiverAuthorizer": "0x4444444444444444444444444444444444444444",
+			"minDeposit":         "5000000",
+		},
+	}
+	out, err := s.EnhancePaymentRequirements(context.Background(), req, types.SupportedKind{}, nil)
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if out.Extra["minDeposit"] != "5000000" {
+		t.Fatalf("minDeposit = %v", out.Extra["minDeposit"])
+	}
+}
+
+func TestEnhancePaymentRequirements_RejectsMinDepositMoneyForNonDefaultAssets(t *testing.T) {
+	s := NewBatchSettlementEvmScheme("0xreceiver", nil)
+	req := types.PaymentRequirements{
+		Network: "eip155:8453",
+		Asset:   "0x00000000000000000000000000000000000000aa",
+		Amount:  "1000",
+		Extra: map[string]interface{}{
+			"receiverAuthorizer": "0x4444444444444444444444444444444444444444",
+			"minDeposit":         "$1",
+		},
+	}
+	_, err := s.EnhancePaymentRequirements(context.Background(), req, types.SupportedKind{}, nil)
+	if err == nil || !strings.Contains(err.Error(), "only supported for default assets") {
+		t.Fatalf("expected default-asset error, got %v", err)
 	}
 }
 
@@ -400,10 +509,10 @@ func TestSession_RoundTrip_CaseInsensitive(t *testing.T) {
 	}
 }
 
-func TestGetAssetDecimals_DefaultsTo6(t *testing.T) {
+func TestGetAssetDecimals_UnknownAsset(t *testing.T) {
 	s := NewBatchSettlementEvmScheme("0xreceiver", nil)
-	if got := s.GetAssetDecimals("0xunknown", x402.Network("nope")); got != 6 {
-		t.Fatalf("got %d", got)
+	if _, ok := s.GetAssetDecimals("0xunknown", x402.Network("nope")); ok {
+		t.Fatal("expected ok=false for unknown asset")
 	}
 }
 
@@ -415,19 +524,19 @@ func TestCreateChannelManager_NotNil(t *testing.T) {
 	}
 }
 
-func TestParseMoneyToDecimal_AllNumericTypes(t *testing.T) {
+func TestParseMoney_AllNumericTypes(t *testing.T) {
 	cases := []struct {
 		in   x402.Price
-		want float64
+		want string
 	}{
-		{"1.5", 1.5},
-		{"$2.25", 2.25},
-		{float64(3.5), 3.5},
-		{int(4), 4.0},
-		{int64(5), 5.0},
+		{"1.5", "1.5"},
+		{"$2.25", "2.25"},
+		{float64(3.5), "3.5"},
+		{int(4), "4"},
+		{int64(5), "5"},
 	}
 	for _, c := range cases {
-		got, err := parseMoneyToDecimal(c.in)
+		got, _, err := x402.ParseMoney(c.in)
 		if err != nil {
 			t.Fatalf("err on %v: %v", c.in, err)
 		}
@@ -437,14 +546,14 @@ func TestParseMoneyToDecimal_AllNumericTypes(t *testing.T) {
 	}
 }
 
-func TestParseMoneyToDecimal_BadString(t *testing.T) {
-	if _, err := parseMoneyToDecimal("nope"); err == nil {
+func TestParseMoney_BadString(t *testing.T) {
+	if _, _, err := x402.ParseMoney("nope"); err == nil {
 		t.Fatal("expected error")
 	}
 }
 
-func TestParseMoneyToDecimal_UnsupportedType(t *testing.T) {
-	if _, err := parseMoneyToDecimal(big.NewInt(1)); err == nil {
+func TestParseMoney_UnsupportedType(t *testing.T) {
+	if _, _, err := x402.ParseMoney(big.NewInt(1)); err == nil {
 		t.Fatal("expected error")
 	}
 }

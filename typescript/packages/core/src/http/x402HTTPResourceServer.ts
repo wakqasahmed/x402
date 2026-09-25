@@ -7,6 +7,7 @@ import {
   SettlePhase,
   resolvePaymentFlow,
   resolvePaymentFlowPhases,
+  resolveFailurePathSettlement,
 } from "../server";
 import {
   decodePaymentSignatureHeader,
@@ -272,6 +273,7 @@ export interface HTTPRequestContext {
   method: string;
   paymentHeader?: string;
   routePattern?: string;
+  decodedPath?: string;
 }
 
 /**
@@ -532,7 +534,7 @@ export class x402HTTPResourceServer {
     const { adapter, path } = context;
 
     // Find matching route
-    const routeMatch = this.getRouteConfig(path, method);
+    const routeMatch = this.getRouteConfig(path, method, context.decodedPath);
     if (!routeMatch) {
       return { type: "no-payment-required" }; // No payment required for this route
     }
@@ -844,12 +846,12 @@ export class x402HTTPResourceServer {
       );
 
       if (!settleResponse.success) {
+        const errorReason = settleResponse.errorReason || "Settlement failed";
         const failure = {
           ...settleResponse,
           success: false as const,
-          errorReason: settleResponse.errorReason || "Settlement failed",
-          errorMessage:
-            settleResponse.errorMessage || settleResponse.errorReason || "Settlement failed",
+          errorReason,
+          errorMessage: settleResponse.errorMessage || errorReason,
           headers: this.createSettlementHeaders(settleResponse),
         };
         const response = await this.buildSettlementFailureResponse(failure, transportContext);
@@ -912,7 +914,18 @@ export class x402HTTPResourceServer {
    */
   requiresPayment(context: HTTPRequestContext): boolean {
     const method = context.method || context.adapter.getMethod();
-    return this.getRouteConfig(context.path, method) !== undefined;
+    return this.getRouteConfig(context.path, method, context.decodedPath) !== undefined;
+  }
+
+  /**
+   * Create settlement response headers
+   *
+   * @param settleResponse - Settlement response
+   * @returns Headers to add to response
+   */
+  createSettlementHeaders(settleResponse: SettleResponse): Record<string, string> {
+    const encoded = encodePaymentResponseHeader(settleResponse);
+    return { "PAYMENT-RESPONSE": encoded };
   }
 
   /**
@@ -931,6 +944,36 @@ export class x402HTTPResourceServer {
   ): Record<string, string> {
     return {
       ...this.createSettlementHeaders(settlement.result),
+      "Cache-Control": withPrivateCacheControl(existingCacheControl ?? null),
+    };
+  }
+
+  /**
+   * PAYMENT-RESPONSE headers when the resource handler fails after before-handler settle.
+   * Prefers cancel/refund settle when present; otherwise echoes the upfront deposit receipt.
+   *
+   * @param cancelSettlement - Result from {@link PaymentCancellationDispatcher.cancel}, if any
+   * @param beforeHandlerSettlement - Completed before-handler settle, when present
+   * @param paymentPayload - Client payment payload (for escrow deposit recovery fields)
+   * @param existingCacheControl - Existing Cache-Control value, if any
+   * @returns PAYMENT-RESPONSE and Cache-Control headers, or undefined when neither receipt applies
+   */
+  createFailurePathSettlementHeaders(
+    cancelSettlement: SettleResponse | void | undefined,
+    beforeHandlerSettlement?: CompletedSettlement,
+    paymentPayload?: PaymentPayload,
+    existingCacheControl?: string | null,
+  ): Record<string, string> | undefined {
+    const receipt = resolveFailurePathSettlement(
+      cancelSettlement,
+      beforeHandlerSettlement,
+      paymentPayload,
+    );
+    if (!receipt) {
+      return undefined;
+    }
+    return {
+      ...this.createSettlementHeaders(receipt),
       "Cache-Control": withPrivateCacheControl(existingCacheControl ?? null),
     };
   }
@@ -1003,7 +1046,11 @@ export class x402HTTPResourceServer {
   ): Promise<HTTPResponseInstructions> {
     const settlementHeaders = failure.headers;
     const routeConfig = transportContext
-      ? this.getRouteConfig(transportContext.request.path, transportContext.request.method)
+      ? this.getRouteConfig(
+          transportContext.request.path,
+          transportContext.request.method,
+          transportContext.request.decodedPath,
+        )
       : undefined;
 
     const customBody = routeConfig?.config.settlementFailedResponseBody
@@ -1188,22 +1235,34 @@ export class x402HTTPResourceServer {
    *
    * @param path - Request path
    * @param method - HTTP method
+   * @param decodedPath - Framework decoded routing view, if distinct from path
    * @returns Route configuration and pattern, or undefined if no match
    */
   private getRouteConfig(
     path: string,
     method: string,
+    decodedPath?: string,
   ): { config: RouteConfig; pattern: string } | undefined {
-    const normalizedPath = this.normalizePath(path);
     const upperMethod = method.toUpperCase();
 
-    const matchingRoute = this.compiledRoutes.find(
-      route =>
-        route.regex.test(normalizedPath) && (route.verb === "*" || route.verb === upperMethod),
-    );
+    const findMatch = (candidate: string): { config: RouteConfig; pattern: string } | undefined => {
+      const matchingRoute = this.compiledRoutes.find(
+        route => route.regex.test(candidate) && (route.verb === "*" || route.verb === upperMethod),
+      );
+      if (!matchingRoute) return undefined;
+      return { config: matchingRoute.config, pattern: matchingRoute.pattern };
+    };
 
-    if (!matchingRoute) return undefined;
-    return { config: matchingRoute.config, pattern: matchingRoute.pattern };
+    const match = findMatch(this.normalizePath(path));
+    if (match !== undefined) {
+      return match;
+    }
+
+    if (decodedPath !== undefined && decodedPath !== path) {
+      return findMatch(this.normalizeDecodedPath(decodedPath));
+    }
+
+    return undefined;
   }
 
   /**
@@ -1306,17 +1365,6 @@ export class x402HTTPResourceServer {
   }
 
   /**
-   * Create settlement response headers
-   *
-   * @param settleResponse - Settlement response
-   * @returns Headers to add to response
-   */
-  private createSettlementHeaders(settleResponse: SettleResponse): Record<string, string> {
-    const encoded = encodePaymentResponseHeader(settleResponse);
-    return { "PAYMENT-RESPONSE": encoded };
-  }
-
-  /**
    * Parse route pattern into verb and regex
    *
    * @param pattern - Route pattern like "GET /api/*", "/api/[id]", or "/api/:id"
@@ -1325,16 +1373,27 @@ export class x402HTTPResourceServer {
   private parseRoutePattern(pattern: string): { verb: string; regex: RegExp; path: string } {
     const [verb, path] = pattern.includes(" ") ? pattern.split(/\s+/) : ["*", pattern];
 
+    // A trailing "/*" must also match the bare prefix. normalizePath strips the
+    // trailing slash, so a request for "/api/premium/" arrives as "/api/premium",
+    // which a literal "/.*?" suffix would not match even though routers dispatch
+    // it to the protected handler.
+    const trailingWildcard = path.endsWith("/*");
+    const pathForRegex = trailingWildcard ? path.slice(0, -2) : path;
+
+    let regexBody = pathForRegex
+      .replace(/\\/g, "\\\\") // Escape backslashes first
+      .replace(/[$()+.?^{|}]/g, "\\$&") // Escape regex special chars
+      .replace(/\*/g, ".*?") // Wildcards
+      .replace(/\[([^\]]+)\]/g, "[^/]+") // Parameters (Next.js style [param])
+      .replace(/:([a-zA-Z_][a-zA-Z0-9_]*)/g, "[^/]+") // Parameters (Express style :param)
+      .replace(/\//g, "\\/"); // Escape slashes
+
+    if (trailingWildcard) {
+      regexBody += "(?:/.*?)?";
+    }
+
     const regex = new RegExp(
-      `^${
-        path
-          .replace(/\\/g, "\\\\") // Escape backslashes first
-          .replace(/[$()+.?^{|}]/g, "\\$&") // Escape regex special chars
-          .replace(/\*/g, ".*?") // Wildcards
-          .replace(/\[([^\]]+)\]/g, "[^/]+") // Parameters (Next.js style [param])
-          .replace(/:([a-zA-Z_][a-zA-Z0-9_]*)/g, "[^/]+") // Parameters (Express style :param)
-          .replace(/\//g, "\\/") // Escape slashes
-      }$`,
+      `^${regexBody}$`,
       // "s" (dotAll): without it, "." can't match LF/CR/U+2028/U+2029, so a wildcard segment containing one fails to match.
       "is",
     );
@@ -1351,27 +1410,38 @@ export class x402HTTPResourceServer {
   private normalizePath(path: string): string {
     const pathWithoutQuery = path.split(/[?#]/)[0];
 
-    // Decode percent-escapes per segment, preserving encoded path separators
-    // (%2F, %5C) as their literal escaped form. Otherwise an attacker could
-    // hide a "/" inside a single segment (e.g. /api/report/a%2Fb), bypassing
-    // a :param route whose regex compiles to [^/]+ while the framework still
-    // dispatches the request as a single-segment match.
-    const parts = pathWithoutQuery.split(/(%2[fF]|%5[cC])/);
-    const decoded = parts
-      .map((part, i) => {
-        if (i % 2 === 1) return part;
+    // Decode percent-escapes per segment and re-escape any separator the decode
+    // yields, so a decoded byte can never create a segment boundary the router
+    // did not see. "\" is escaped rather than folded into "/" because routers
+    // treat it as an ordinary in-segment character; folding it would split the
+    // path into more segments than the router saw and fail open on a :param
+    // route whose regex compiles to [^/]+.
+    const normalized = pathWithoutQuery
+      .split("/")
+      .map(segment => {
+        let decoded: string;
         try {
-          return decodeURIComponent(part);
+          decoded = decodeURIComponent(segment);
         } catch {
-          return part;
+          // Malformed escape: match the raw segment rather than widening it.
+          return segment;
         }
+        return decoded.replace(/\//g, "%2F").replace(/\\/g, "%5C");
       })
-      .join("");
+      .join("/");
 
-    return decoded
-      .replace(/\\/g, "/")
-      .replace(/\/+/g, "/")
-      .replace(/(.+?)\/+$/, "$1");
+    return normalized.replace(/\/+/g, "/").replace(/(.+?)\/+$/, "$1");
+  }
+
+  /**
+   * Normalize a framework-decoded path without re-decoding percent-escapes.
+   *
+   * @param path - Framework-decoded path
+   * @returns Normalized path
+   */
+  private normalizeDecodedPath(path: string): string {
+    const pathWithoutQuery = path.split(/[?#]/)[0];
+    return pathWithoutQuery.replace(/\/+/g, "/").replace(/(.+?)\/+$/, "$1") || "/";
   }
 
   /**

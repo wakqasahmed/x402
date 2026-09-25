@@ -1,5 +1,68 @@
 # @x402/mcp Changelog
 
+## 2.27.0
+
+### Minor Changes
+
+- Updated dependencies [5d3a2b2](https://github.com/x402-foundation/x402/commit/5d3a2b2)
+  - @x402/core@2.27.0
+
+## 2.26.0
+
+### Minor Changes
+
+- Updated dependencies [76fe973](https://github.com/x402-foundation/x402/commit/76fe973)
+  - @x402/core@2.26.0
+
+### Patch Changes
+
+- [fdeda56](https://github.com/x402-foundation/x402/commit/fdeda56): MCP tool calls derive their request timeout from the accept's `maxTimeoutSeconds` (default 300s when missing) instead of the MCP SDK's 60s default. A client-owned `maxRequestTimeoutSeconds` ceiling (default 600s) bounds hostile accepts; raise it when you need to wait longer. The initial 402 probe uses `min(300s, cap)` unless the caller passes an explicit per-call `timeout`. Auto-pay now forwards the original call options into the paid retry so accept timeouts apply. ([#3430](https://github.com/x402-foundation/x402/pull/3430)) - Thanks [@phdargen](https://github.com/phdargen)!
+
+## 2.25.0
+
+### Minor Changes
+
+- Updated dependencies [1bc2ae8](https://github.com/x402-foundation/x402/commit/1bc2ae8)
+- Updated dependencies [299b9bc](https://github.com/x402-foundation/x402/commit/299b9bc)
+- Updated dependencies [bbcb974](https://github.com/x402-foundation/x402/commit/bbcb974)
+  - @x402/core@2.25.0
+
+## 2.24.0
+
+### Minor Changes
+
+- [8707ab7](https://github.com/x402-foundation/x402/commit/8707ab7): Withhold MCP tool content when after-handler settlement returns `{ success: false }`. ([#3246](https://github.com/x402-foundation/x402/pull/3246)) - Thanks [@phdargen](https://github.com/phdargen)!
+- Updated dependencies
+  - @x402/core@2.24.0
+
+## 2.23.0
+
+### Minor Changes
+
+- [79b6259](https://github.com/x402-foundation/x402/commit/79b6259): Add scheme hooks for usage-based payments: `SchemeNetworkServer.settleOnCancel` settles once when a verified payment is canceled, and `dynamicExtraFields` excludes per-response `extra` keys from v2 requirement matching. Export `resolveFailurePathSettlement` and use it in MCP so handler failure/throw paths prefer cancel/refund receipts (with deposit recovery `extra` on failed cancel) over echoing the before-handler deposit alone. ([#3094](https://github.com/x402-foundation/x402/pull/3094)) - Thanks [@phdargen](https://github.com/phdargen) and [@lgalabru](https://github.com/lgalabru)!
+- Updated dependencies [79b6259](https://github.com/x402-foundation/x402/commit/79b6259)
+- Updated dependencies [4f58723](https://github.com/x402-foundation/x402/commit/4f58723)
+- Updated dependencies [ab1a31a](https://github.com/x402-foundation/x402/commit/ab1a31a)
+- Updated dependencies [c2612d3](https://github.com/x402-foundation/x402/commit/c2612d3)
+- Updated dependencies [656437e](https://github.com/x402-foundation/x402/commit/656437e)
+  - @x402/core@2.23.0
+
+### Patch Changes
+
+- [4f58723](https://github.com/x402-foundation/x402/commit/4f58723): Normalize each mechanism's default assets into `DEFAULT_ASSETS` + `getDefaultAsset` / `findDefaultAsset`, and add client `spendControls`: by default only recognized pegged assets are allowed with a `$1` USD cap; opt into other tokens via `allowedAssets` (list with optional integer atomic `maxAmountPerPayment`, or `true` to allow any); pass `spendControls: false` to disable all spend controls. A non-integer per-asset cap is a config error; a non-integer 402 amount on that path is dropped. Keeta, XRPL, and Concordium now ship USD defaults (USDC, RLUSD, USDR). XRPL pins the RLUSD issuer in the client scheme before signing. `$` settlement overrides throw when `getAssetDecimals` is unknown instead of guessing 6 decimals. Notable API moves: `DEFAULT_STABLECOINS` / `USDC_CONFIG` / `DEFAULT_ASSET_BY_NETWORK` → `DEFAULT_ASSETS` (list per network); identifier field `address` / `asaId` → `asset`; TVM `getDefaultAsset` returns an entry (use `.asset`). EVM `getAssetDecimals` is asset-aware; aptos unknown networks throw; EVM/SVM register helpers scope v1 networks to `config.networks`. Paywall uses `spendControls: false` (UI approval); MCP forwards `spendControls`. ([#3124](https://github.com/x402-foundation/x402/pull/3124)) - Thanks [@phdargen](https://github.com/phdargen)!
+
+## 2.22.0
+
+### Minor Changes
+
+- [db5da2e](https://github.com/x402-foundation/x402/commit/db5da2e): Validate unsupported `paymentFlow` / `assetTransferMethod` at HTTP server construction and MCP `createPaymentWrapper` when the scheme is registered, and return a generic internal error from HTTP adapters and MCP wrappers for unexpected failures instead of leaking internal error details to clients. ([#3053](https://github.com/x402-foundation/x402/pull/3053)) - Thanks [@phdargen](https://github.com/phdargen)!
+- [db5da2e](https://github.com/x402-foundation/x402/commit/db5da2e): Require ATM-keyed `paymentFlows` (and `defaultAssetTransferMethod`) on every `SchemeNetworkServer`. Core resolves ATM/flow from the table, rejects unsupported combinations, and always signals non-`authorization` `paymentFlow` on the 402 wire. All schemes currently declare `authorization` only. ([#3053](https://github.com/x402-foundation/x402/pull/3053)) - Thanks [@phdargen](https://github.com/phdargen)!
+- Updated dependencies [37412e7](https://github.com/x402-foundation/x402/commit/37412e7)
+- Updated dependencies [db5da2e](https://github.com/x402-foundation/x402/commit/db5da2e)
+- Updated dependencies [db5da2e](https://github.com/x402-foundation/x402/commit/db5da2e)
+- Updated dependencies [1601942](https://github.com/x402-foundation/x402/commit/1601942)
+  - @x402/core@2.22.0
+
 ## 2.21.0
 
 ### Minor Changes
@@ -10,6 +73,7 @@
 - Updated dependencies [ee1b148](https://github.com/x402-foundation/x402/commit/ee1b148)
 - Updated dependencies [e805616](https://github.com/x402-foundation/x402/commit/e805616)
 - Updated dependencies [5192e50](https://github.com/x402-foundation/x402/commit/5192e50)
+
   - @x402/core@2.21.0
 
 - [08e84ab](https://github.com/x402-foundation/x402/commit/08e84ab): Plumb policies and paymentRequirementsSelector through createx402MCPClient so the documented factory can bound agent spend. ([#3034](https://github.com/x402-foundation/x402/pull/3034)) - Thanks [@SashaMIT](https://github.com/SashaMIT)!

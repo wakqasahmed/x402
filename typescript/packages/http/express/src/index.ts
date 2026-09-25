@@ -8,6 +8,7 @@ import {
   FacilitatorClient,
   FacilitatorResponseError,
   getFacilitatorResponseError,
+  attachBackgroundInitHandler,
   SETTLEMENT_OVERRIDES_HEADER,
   SettlementOverrides,
   checkIfBazaarNeeded,
@@ -65,6 +66,20 @@ function sendInternalError(res: Response, error: unknown): void {
 }
 
 /**
+ * Decode percent-escapes in a request path.
+ *
+ * @param path - Request path
+ * @returns Decoded path, or the original if decoding fails
+ */
+function decodedRoutePath(path: string): string {
+  try {
+    return decodeURIComponent(path);
+  } catch {
+    return path;
+  }
+}
+
+/**
  * Express payment middleware for x402 protocol (direct HTTP server instance).
  *
  * Use this when you need to configure HTTP-level hooks.
@@ -102,11 +117,11 @@ export function paymentMiddlewareFromHTTPServer(
   // Store initialization promise (not the result)
   // httpServer.initialize() fetches facilitator support and validates routes
   let initPromise: Promise<void> | null = syncFacilitatorOnStart ? httpServer.initialize() : null;
-  // Attach a no-op rejection handler so an early failure (e.g. a facilitator
-  // request timeout) cannot become an unhandled rejection before the first
-  // protected request awaits initPromise. The original promise is kept, so that
-  // request still observes the failure and triggers the retry path.
-  void initPromise?.catch(() => {});
+  // Retryable failures (e.g. a facilitator timeout) must not become unhandled
+  // rejections; the original promise is still awaited on the first protected
+  // request. Fatal capability / route mismatches exit the process so a
+  // misconfigured server does not stay up until that request.
+  attachBackgroundInitHandler(initPromise);
   let isInitialized = false;
 
   /**
@@ -152,9 +167,11 @@ export function paymentMiddlewareFromHTTPServer(
   return async (req: Request, res: Response, next: NextFunction) => {
     // Create adapter and context
     const adapter = new ExpressAdapter(req);
+    const path = req.path;
     const context: HTTPRequestContext = {
       adapter,
-      path: req.path,
+      path,
+      decodedPath: decodedRoutePath(path),
       method: req.method,
       paymentHeader: adapter.getHeader("payment-signature") || adapter.getHeader("x-payment"),
     };
@@ -294,23 +311,21 @@ export function paymentMiddlewareFromHTTPServer(
         try {
           await Promise.resolve(next());
         } catch (error) {
-          await cancellationDispatcher.cancel({
+          const cancelSettlement = await cancellationDispatcher.cancel({
             reason: "handler_threw",
             error,
           });
-          // Echo before-handler receipt so the payer still gets the tx hash
-          if (beforeHandlerSettlement) {
-            const existingCacheControl =
-              res.getHeader("Cache-Control") != null
-                ? String(res.getHeader("Cache-Control"))
-                : null;
-            Object.entries(
-              httpServer.createCompletedSettlementHeaders(
-                beforeHandlerSettlement,
-                existingCacheControl,
-              ),
-            ).forEach(([key, value]) => {
-              res.setHeader(key, value);
+          const existingCacheControl =
+            res.getHeader("Cache-Control") != null ? String(res.getHeader("Cache-Control")) : null;
+          const failureHeaders = httpServer.createFailurePathSettlementHeaders(
+            cancelSettlement,
+            beforeHandlerSettlement,
+            paymentPayload,
+            existingCacheControl,
+          );
+          if (failureHeaders) {
+            Object.entries(failureHeaders).forEach(([key, value]) => {
+              res.setHeader(key, String(value));
             });
           }
           bufferedCalls = [];
@@ -323,24 +338,22 @@ export function paymentMiddlewareFromHTTPServer(
 
         // If the response from the protected route is >= 400, do not settle payment
         if (res.statusCode >= 400) {
-          await cancellationDispatcher.cancel({
+          const cancelSettlement = await cancellationDispatcher.cancel({
             reason: "handler_failed",
             responseStatus: res.statusCode,
           });
           res.removeHeader(SETTLEMENT_OVERRIDES_HEADER);
-          // Echo before-handler receipt (e.g. upfront) so the payer still gets the tx hash
-          if (beforeHandlerSettlement) {
-            const existingCacheControl =
-              res.getHeader("Cache-Control") != null
-                ? String(res.getHeader("Cache-Control"))
-                : null;
-            Object.entries(
-              httpServer.createCompletedSettlementHeaders(
-                beforeHandlerSettlement,
-                existingCacheControl,
-              ),
-            ).forEach(([key, value]) => {
-              res.setHeader(key, value);
+          const existingCacheControl =
+            res.getHeader("Cache-Control") != null ? String(res.getHeader("Cache-Control")) : null;
+          const failureHeaders = httpServer.createFailurePathSettlementHeaders(
+            cancelSettlement,
+            beforeHandlerSettlement,
+            paymentPayload,
+            existingCacheControl,
+          );
+          if (failureHeaders) {
+            Object.entries(failureHeaders).forEach(([key, value]) => {
+              res.setHeader(key, String(value));
             });
           }
           restoreResponseMethods();

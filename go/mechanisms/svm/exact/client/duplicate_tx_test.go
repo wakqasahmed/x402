@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +12,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"unicode/utf8"
+
+	x402 "github.com/x402-foundation/x402/go/v2"
 
 	bin "github.com/gagliardetto/binary"
 	solana "github.com/gagliardetto/solana-go"
@@ -202,10 +205,10 @@ func TestMintMetadataCacheAvoidsRepeatedMintRPC(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	_, err := client.CreatePaymentPayload(ctx, requirements)
+	_, err := client.CreatePaymentPayload(ctx, requirements, x402.PaymentPayloadContext{})
 	require.NoError(t, err)
 
-	_, err = client.CreatePaymentPayload(ctx, requirements)
+	_, err = client.CreatePaymentPayload(ctx, requirements, x402.PaymentPayloadContext{})
 	require.NoError(t, err)
 
 	assert.Equal(t, int32(1), atomic.LoadInt32(&accountInfoCalls))
@@ -236,7 +239,7 @@ func TestRecentBlockhashResolution(t *testing.T) {
 			},
 		}
 
-		payload, err := client.CreatePaymentPayload(context.Background(), requirements)
+		payload, err := client.CreatePaymentPayload(context.Background(), requirements, x402.PaymentPayloadContext{})
 		require.NoError(t, err)
 
 		decoded, err := svm.DecodeTransaction(payload.Payload["transaction"].(string))
@@ -269,7 +272,7 @@ func TestRecentBlockhashResolution(t *testing.T) {
 			},
 		}
 
-		payload, err := client.CreatePaymentPayload(context.Background(), requirements)
+		payload, err := client.CreatePaymentPayload(context.Background(), requirements, x402.PaymentPayloadContext{})
 		require.NoError(t, err)
 
 		decoded, err := svm.DecodeTransaction(payload.Payload["transaction"].(string))
@@ -308,7 +311,7 @@ func TestRecentBlockhashResolution(t *testing.T) {
 				},
 			}
 
-			payload, err := client.CreatePaymentPayload(context.Background(), requirements)
+			payload, err := client.CreatePaymentPayload(context.Background(), requirements, x402.PaymentPayloadContext{})
 			require.NoError(t, err)
 
 			decoded, err := svm.DecodeTransaction(payload.Payload["transaction"].(string))
@@ -352,10 +355,10 @@ func TestFixedBlockhashProducesDistinctTransactions(t *testing.T) {
 
 		ctx := context.Background()
 
-		payload1, err := client.CreatePaymentPayload(ctx, requirements)
+		payload1, err := client.CreatePaymentPayload(ctx, requirements, x402.PaymentPayloadContext{})
 		require.NoError(t, err, "First payload creation should succeed")
 
-		payload2, err := client.CreatePaymentPayload(ctx, requirements)
+		payload2, err := client.CreatePaymentPayload(ctx, requirements, x402.PaymentPayloadContext{})
 		require.NoError(t, err, "Second payload creation should succeed")
 
 		tx1 := payload1.Payload["transaction"].(string)
@@ -415,10 +418,10 @@ func TestFixedBlockhashProducesDistinctTransactions(t *testing.T) {
 
 		ctx := context.Background()
 
-		payload1, err := client.CreatePaymentPayload(ctx, requirements)
+		payload1, err := client.CreatePaymentPayload(ctx, requirements, x402.PaymentPayloadContext{})
 		require.NoError(t, err)
 
-		payload2, err := client.CreatePaymentPayload(ctx, requirements)
+		payload2, err := client.CreatePaymentPayload(ctx, requirements, x402.PaymentPayloadContext{})
 		require.NoError(t, err)
 
 		tx1 := payload1.Payload["transaction"].(string)
@@ -471,7 +474,7 @@ func TestFixedBlockhashProducesDistinctTransactions(t *testing.T) {
 			wg.Add(1)
 			go func(idx int) {
 				defer wg.Done()
-				payload, err := client.CreatePaymentPayload(ctx, requirements)
+				payload, err := client.CreatePaymentPayload(ctx, requirements, x402.PaymentPayloadContext{})
 				if err != nil {
 					t.Errorf("Concurrent request %d failed: %v", idx, err)
 					return
@@ -495,6 +498,43 @@ func TestFixedBlockhashProducesDistinctTransactions(t *testing.T) {
 		t.Logf("Concurrent requests: %d", numConcurrent)
 		t.Logf("Unique transactions: %d", len(unique))
 	})
+}
+
+// TestComputeBudgetUsesSchemeDefaults pins the ComputeBudget prefix the exact
+// client always emits. The prefix is not client-configurable: the facilitator
+// verifies instruction shape and priority fee against exactly these two.
+func TestComputeBudgetUsesSchemeDefaults(t *testing.T) {
+	server := httptest.NewServer(mockSolanaRPCHandler(t, func() string { return fixedBlockhash }))
+	defer server.Close()
+
+	signer := &mockClientSigner{keypair: solana.NewWallet().PrivateKey}
+	client := NewExactSvmScheme(signer, &svm.ClientConfig{RPCURL: server.URL})
+
+	requirements := types.PaymentRequirements{
+		Scheme:            "exact",
+		Network:           "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
+		Asset:             "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
+		Amount:            "100000",
+		PayTo:             solana.NewWallet().PublicKey().String(),
+		MaxTimeoutSeconds: 3600,
+		Extra:             map[string]interface{}{"feePayer": solana.NewWallet().PublicKey().String()},
+	}
+	payload, err := client.CreatePaymentPayload(context.Background(), requirements, x402.PaymentPayloadContext{})
+	require.NoError(t, err)
+
+	decoded, err := svm.DecodeTransaction(payload.Payload["transaction"].(string))
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, len(decoded.Message.Instructions), 2)
+
+	limitIx := decoded.Message.Instructions[0]
+	priceIx := decoded.Message.Instructions[1]
+	require.Equal(t, solana.ComputeBudget, decoded.Message.AccountKeys[limitIx.ProgramIDIndex])
+	require.Equal(t, solana.ComputeBudget, decoded.Message.AccountKeys[priceIx.ProgramIDIndex])
+
+	assert.Equal(t, svm.DefaultComputeUnitLimit, binary.LittleEndian.Uint32(limitIx.Data[1:5]))
+	assert.Equal(
+		t, uint64(svm.DefaultComputeUnitPriceMicrolamports), binary.LittleEndian.Uint64(priceIx.Data[1:9]),
+	)
 }
 
 func TestFacilitatorInstructionCountConstraints(t *testing.T) {
@@ -568,7 +608,7 @@ func TestMemoDataIsValidUTF8(t *testing.T) {
 
 		ctx := context.Background()
 
-		payload, err := client.CreatePaymentPayload(ctx, requirements)
+		payload, err := client.CreatePaymentPayload(ctx, requirements, x402.PaymentPayloadContext{})
 		require.NoError(t, err)
 
 		tx1 := payload.Payload["transaction"].(string)
@@ -632,7 +672,7 @@ func TestMemoInstructionHasNoSigners(t *testing.T) {
 		Extra:             map[string]interface{}{"feePayer": solana.NewWallet().PublicKey().String()},
 	}
 
-	payload, err := client.CreatePaymentPayload(context.Background(), requirements)
+	payload, err := client.CreatePaymentPayload(context.Background(), requirements, x402.PaymentPayloadContext{})
 	require.NoError(t, err)
 
 	decoded, err := svm.DecodeTransaction(payload.Payload["transaction"].(string))
@@ -671,7 +711,7 @@ func TestSellerMemo(t *testing.T) {
 			},
 		}
 
-		payload, err := client.CreatePaymentPayload(context.Background(), requirements)
+		payload, err := client.CreatePaymentPayload(context.Background(), requirements, x402.PaymentPayloadContext{})
 		require.NoError(t, err)
 
 		decoded, err := svm.DecodeTransaction(payload.Payload["transaction"].(string))
@@ -716,9 +756,9 @@ func TestSellerMemo(t *testing.T) {
 
 		ctx := context.Background()
 
-		payload1, err := client.CreatePaymentPayload(ctx, requirements)
+		payload1, err := client.CreatePaymentPayload(ctx, requirements, x402.PaymentPayloadContext{})
 		require.NoError(t, err)
-		payload2, err := client.CreatePaymentPayload(ctx, requirements)
+		payload2, err := client.CreatePaymentPayload(ctx, requirements, x402.PaymentPayloadContext{})
 		require.NoError(t, err)
 
 		decoded1, err := svm.DecodeTransaction(payload1.Payload["transaction"].(string))
@@ -760,7 +800,7 @@ func TestSellerMemo(t *testing.T) {
 			},
 		}
 
-		_, err := client.CreatePaymentPayload(context.Background(), requirements)
+		_, err := client.CreatePaymentPayload(context.Background(), requirements, x402.PaymentPayloadContext{})
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), ErrMemoExceedsMaxSize)
 	})
@@ -792,9 +832,9 @@ func TestSellerMemo(t *testing.T) {
 
 		ctx := context.Background()
 
-		payload1, err := client.CreatePaymentPayload(ctx, requirements)
+		payload1, err := client.CreatePaymentPayload(ctx, requirements, x402.PaymentPayloadContext{})
 		require.NoError(t, err)
-		payload2, err := client.CreatePaymentPayload(ctx, requirements)
+		payload2, err := client.CreatePaymentPayload(ctx, requirements, x402.PaymentPayloadContext{})
 		require.NoError(t, err)
 
 		decoded1, err := svm.DecodeTransaction(payload1.Payload["transaction"].(string))
